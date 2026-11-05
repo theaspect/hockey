@@ -77,7 +77,7 @@ const PATROL_AMP = 260;
 const PATROL_FREQ = 0.9;
 const PAD_ACTIONS = ['PadA', 'PadB', 'PadX', 'PadY', 'PadRT', 'PadRB'];
 // Кнопка меню, кнопки действия и джойстики привязаны к краям экрана — см. menuButton() / actionButtonOf() / stickHomeOf().
-const VERSION = 'v12'; // показывается в углу экрана; поднимать при каждой выкладке
+const VERSION = 'v13'; // показывается в углу экрана; поднимать при каждой выкладке
 const SLOW_PUCK = 300; // медленную шайбу вратарь берёт просто касанием, без кнопки
 const STICK_RADIUS = 80; // насколько отводить палец экранного джойстика для полной скорости
 const TOUCH_STICK_DEADZONE = 0.15;
@@ -1037,10 +1037,24 @@ function difficultyRect(row, i) {
   const w = (row.w - gap * (DIFFICULTIES.length - 1)) / DIFFICULTIES.length;
   return { x: row.x + i * (w + gap), y: row.y, w, h: row.h };
 }
+// Настройки — ряд из двух кнопок: «Имена» (окошко с полями) и «Музыка» (вкл/выкл).
+const SETTINGS = [
+  { key: 'names', action: () => Names.openDialog(PLAYER_COLORS) },
+  { key: 'music', action: () => Music.toggle() },
+];
+const SETTINGS_ITEM = { icon: 'settings', action: () => SETTINGS[settingsFocus].action() };
+let settingsFocus = 0;
+
+function settingsRect(row, i) {
+  const gap = 16;
+  const w = (row.w - gap) / 2;
+  return { x: row.x + i * (w + gap), y: row.y, w, h: row.h };
+}
+
 let menuIndex = 0;
 
 function menuItems() {
-  const items = [...MODE_ITEMS, DIFFICULTY_ITEM];
+  const items = [...MODE_ITEMS, DIFFICULTY_ITEM, SETTINGS_ITEM];
   return pausedState ? [CONTINUE_ITEM, ...items] : items;
 }
 
@@ -1051,8 +1065,8 @@ function resume() {
 
 function menuItemRect(i) {
   const items = menuItems();
-  const h = 120;
-  const gap = 30;
+  const h = 110;
+  const gap = 24;
   const top = RINK.cy - (items.length * h + (items.length - 1) * gap) / 2;
   return { x: RINK.cx - 300, y: top + i * (h + gap), w: 600, h };
 }
@@ -1086,6 +1100,7 @@ function chooseMenuItem(i) {
 }
 
 function updateMenu() {
+  if (Names.open) return; // пока открыто окошко с именами, меню ждёт
   const items = menuItems();
   if (pausedState && Input.wasPressed('Escape', 'PadStart', 'PadSelect', 'PadB')) {
     resume();
@@ -1100,11 +1115,22 @@ function updateMenu() {
     if (Input.wasPressed('ArrowLeft', 'KeyA', 'PadLeft')) setDifficulty(difficultyIndex - 1);
     if (Input.wasPressed('ArrowRight', 'KeyD', 'PadRight')) setDifficulty(difficultyIndex + 1);
   }
+  if (items[menuIndex] === SETTINGS_ITEM) {
+    if (Input.wasPressed('ArrowLeft', 'KeyA', 'PadLeft')) settingsFocus = 0;
+    if (Input.wasPressed('ArrowRight', 'KeyD', 'PadRight')) settingsFocus = 1;
+  }
   if (Input.wasPressed('Enter', 'Space', 'PadA')) return chooseMenuItem(menuIndex);
   if (!Input.pointer.pressed) return;
   const p = toHud(Input.pointer);
   const hit = items.findIndex((_, i) => pointInRect(p, menuItemRect(i)));
   if (hit < 0) return;
+  if (items[hit] === SETTINGS_ITEM) {
+    const sub = SETTINGS.findIndex((_, i) => pointInRect(p, settingsRect(menuItemRect(hit), i)));
+    if (sub < 0) return;
+    menuIndex = hit;
+    settingsFocus = sub;
+    return chooseMenuItem(hit);
+  }
   if (items[hit] !== DIFFICULTY_ITEM) return chooseMenuItem(hit);
   const row = menuItemRect(hit);
   const level = DIFFICULTIES.findIndex((_, i) => pointInRect(p, difficultyRect(row, i)));
@@ -1129,6 +1155,7 @@ function stickMenuStep() {
 
 function update(dt) {
   if (Input.anyPress()) Sound.unlock();
+  Music.update();
   Effects.update(dt);
   saveFlash = Math.max(0, saveFlash - dt);
   goalie.swing = Math.max(0, goalie.swing - dt / SWING_TIME);
@@ -1228,6 +1255,7 @@ function drawPlayer(p, time) {
   ctx.arc(x, y, r, 0, Math.PI * 2);
   ctx.fill();
   drawCircle(ctx, x, y, r, '#ffffff', 4);
+  drawNameRing(p, nameOf(p), readerUpAngle(p));
 
   // Шлем с глазками — смотрит туда же, куда игрок.
   const hx = x + fx * 4;
@@ -1250,6 +1278,65 @@ function drawPlayer(p, time) {
   }
   if (p === goalie) drawGoalieMask(hx, hy, r * 0.55, fx, fy);
   else drawVisor(hx, hy, r * 0.55, fx, fy);
+}
+
+// Чей это игрок (0 или 1) и какое у него имя. В «1 игрок» нападающий — компьютер.
+function ownerOf(p) {
+  if (mode === 'pvc') return 0;
+  return p === goalie ? goalieOwner : 1 - goalieOwner;
+}
+
+function nameOf(p) {
+  if (mode === 'pvc' && p === skater) return 'Робот';
+  return Names.get(ownerOf(p));
+}
+
+// Куда «вверх» для того, кто читает имя (угол на площадке). На планшете вдвоём каждый сидит
+// у своего узкого края за своими воротами: игрок 0 — слева (его «вверх» — вправо), игрок 1 — справа.
+// Иначе все смотрят на экран как обычно.
+function readerUpAngle(p) {
+  if (!tabletDuel()) return -Math.PI / 2;
+  const screenUp = ownerOf(p) === 0 ? 0 : Math.PI;
+  return flipped() ? screenUp + Math.PI : screenUp;
+}
+
+// Имя по кругу на спине, между шлемом и краем формы. Дуга — сверху для читающего,
+// буквы идут слева направо и смотрят «головой» наружу, так что читается без поворота головы.
+function drawNameRing(p, name, upAngle) {
+  const text = name.toUpperCase();
+  if (!text) return;
+  const radius = p.r * 0.78;
+  let size = p.r * 0.34;
+  const maxArc = Math.PI * 2 * radius * 0.85;
+  const measure = () => {
+    ctx.font = `bold ${size}px sans-serif`;
+    return [...text].map((ch) => ctx.measureText(ch).width + size * 0.08);
+  };
+  let widths = measure();
+  const total = widths.reduce((a, b) => a + b, 0);
+  if (total > maxArc) {
+    size *= maxArc / total;
+    widths = measure();
+  }
+  let angle = upAngle - widths.reduce((a, b) => a + b, 0) / radius / 2;
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineJoin = 'round';
+  [...text].forEach((ch, i) => {
+    const a = angle + widths[i] / 2 / radius;
+    ctx.save();
+    ctx.translate(p.x + Math.cos(a) * radius, p.y + Math.sin(a) * radius);
+    ctx.rotate(a + Math.PI / 2);
+    ctx.lineWidth = size * 0.25;
+    ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+    ctx.strokeText(ch, 0, 0);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(ch, 0, 0);
+    ctx.restore();
+    angle += widths[i] / radius;
+  });
+  ctx.restore();
 }
 
 // Вратарский шлем: решётка-маска на лице.
@@ -1653,6 +1740,39 @@ function drawDifficultyRow(row, focused, time) {
   });
 }
 
+// Ряд настроек: «✏️ Имена» и «🎵 Музыка» / «🔇 Тихо».
+function drawSettingsRow(row, focused, time) {
+  const buttons = [
+    { icon: '✏️', label: 'Имена', color: '#5c6bc0', dim: false },
+    { icon: Music.enabled ? '🎵' : '🔇', label: Music.enabled ? 'Музыка' : 'Тихо', color: '#26a69a', dim: !Music.enabled },
+  ];
+  buttons.forEach((b, i) => {
+    const r = settingsRect(row, i);
+    const active = focused && i === settingsFocus;
+    const grow = active ? 1 + 0.04 * Math.sin(time * 6) : 1;
+    ctx.save();
+    ctx.globalAlpha = b.dim ? 0.6 : 1;
+    ctx.translate(r.x + r.w / 2, r.y + r.h / 2);
+    ctx.scale(grow, grow);
+    ctx.fillStyle = b.color;
+    ctx.beginPath();
+    ctx.roundRect(-r.w / 2, -r.h / 2, r.w, r.h, 32);
+    ctx.fill();
+    ctx.strokeStyle = active ? '#ffd600' : '#ffffff';
+    ctx.lineWidth = active ? 12 : 4;
+    ctx.stroke();
+    ctx.fillStyle = '#ffffff';
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
+    ctx.font = '44px sans-serif';
+    ctx.fillText(b.icon, -r.w / 2 + 52, 4);
+    ctx.font = 'bold 40px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(b.label, -r.w / 2 + 92, 4);
+    ctx.restore();
+  });
+}
+
 function drawMenu(time) {
   drawOverlay();
   menuItems().forEach((item, i) => {
@@ -1660,6 +1780,10 @@ function drawMenu(time) {
     const selected = i === menuIndex;
     if (item === DIFFICULTY_ITEM) {
       drawDifficultyRow(r, selected, time);
+      return;
+    }
+    if (item === SETTINGS_ITEM) {
+      drawSettingsRow(r, selected, time);
       return;
     }
     const grow = selected ? 1 + 0.04 * Math.sin(time * 6) : 1;
@@ -1705,8 +1829,8 @@ function draw(time) {
   }
   drawRink(ctx);
   drawPlayer(skater, time);
+  drawGlove(); // под вратарём, чтобы не закрывать имя на спине
   drawPlayer(goalie, time);
-  drawGlove();
   drawRadar();
   drawPuck();
   drawSaveFlash();

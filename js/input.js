@@ -145,7 +145,13 @@ function deviceOf(e) {
   return e.pointerType === 'mouse' ? 'mouse' : 'touch';
 }
 
+// Пока человек печатает в поле (окошко «Имена»), клавиши в игру не идут.
+function typingInField(e) {
+  return e.target instanceof HTMLInputElement;
+}
+
 window.addEventListener('keydown', (e) => {
+  if (typingInField(e)) return;
   if (!e.repeat) Input.pressed.add(e.code);
   Input.keys.add(e.code);
   Input.lastDevice = 'key';
@@ -158,6 +164,7 @@ window.addEventListener('blur', () => {
 });
 
 window.addEventListener('pointerdown', (e) => {
+  if (e.target.tagName !== 'CANVAS') return; // нажатия по окошкам поверх игры — не игре
   const type = deviceOf(e);
   Input.lastDevice = type;
   Input.pointers.set(e.pointerId, { id: e.pointerId, x: e.clientX, y: e.clientY, type, startX: e.clientX, startY: e.clientY });
