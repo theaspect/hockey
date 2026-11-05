@@ -80,19 +80,34 @@ const MENU_BUTTON = { x: 50, y: 48, r: 32 };
 const ACTION_BUTTON = { x: WORLD.w - 130, y: WORLD.h - 130, r: 90 }; // кнопка «поймать/бросить» на планшете
 const SLOW_PUCK = 300; // медленную шайбу вратарь берёт просто касанием, без кнопки
 
+// Игра всегда альбомная. Если экран стоит вертикально (iPad не даёт странице запретить поворот),
+// рисуем всё повёрнутым на 90° — картинка остаётся альбомной и занимает весь экран.
+// Размер холста задаём точно в пикселях окна: в Safari 100vh больше видимой области и картинка сплющивалась.
 function resize() {
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  view.w = w;
+  view.rotated = h > w;
   view.dpr = window.devicePixelRatio || 1;
-  canvas.width = Math.round(window.innerWidth * view.dpr);
-  canvas.height = Math.round(window.innerHeight * view.dpr);
-  view.scale = Math.min(window.innerWidth / WORLD.w, window.innerHeight / WORLD.h);
-  view.ox = (window.innerWidth - WORLD.w * view.scale) / 2;
-  view.oy = (window.innerHeight - WORLD.h * view.scale) / 2;
+  canvas.width = Math.round(w * view.dpr);
+  canvas.height = Math.round(h * view.dpr);
+  canvas.style.width = `${w}px`;
+  canvas.style.height = `${h}px`;
+  const lw = view.rotated ? h : w; // размеры «альбомного» экрана
+  const lh = view.rotated ? w : h;
+  view.scale = Math.min(lw / WORLD.w, lh / WORLD.h);
+  view.ox = (lw - WORLD.w * view.scale) / 2;
+  view.oy = (lh - WORLD.h * view.scale) / 2;
 }
 window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 200));
+if (window.visualViewport) window.visualViewport.addEventListener('resize', resize);
 resize();
 
+// Точка экрана → точка «альбомного» экрана (с учётом поворота) → координаты игры.
 function toWorld(p) {
-  return { x: (p.x - view.ox) / view.scale, y: (p.y - view.oy) / view.scale };
+  const l = view.rotated ? { x: p.y, y: view.w - p.x } : p;
+  return { x: (l.x - view.ox) / view.scale, y: (l.y - view.oy) / view.scale };
 }
 
 function rand(min, max) {
@@ -1200,8 +1215,10 @@ function draw(time) {
   ctx.fillStyle = '#24375e';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  const s = view.scale * view.dpr;
-  ctx.setTransform(s, 0, 0, s, view.ox * view.dpr, view.oy * view.dpr);
+  const d = view.dpr;
+  if (view.rotated) ctx.setTransform(0, d, -d, 0, view.w * d, 0); // поворот на 90° по часовой
+  else ctx.setTransform(d, 0, 0, d, 0, 0);
+  ctx.transform(view.scale, 0, 0, view.scale, view.ox, view.oy);
 
   drawRink(ctx);
   drawHumanRing();

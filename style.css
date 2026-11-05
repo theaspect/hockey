@@ -11,8 +11,10 @@ html, body {
   overscroll-behavior: none;
 }
 
+/* Размер холста задаёт game.js точно по окну (100vh в Safari больше видимой области). */
 canvas {
   display: block;
-  width: 100vw;
-  height: 100vh;
+  position: fixed;
+  left: 0;
+  top: 0;
 }
