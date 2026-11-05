@@ -75,27 +75,55 @@ const Input = {
   },
 
   padConnected: false,
+  // Каждый геймпад по отдельности (для игры вдвоём): [{ stick, held, pressed }], по порядку подключения.
+  pads: [],
+  prevPadHeld: {},
 
   pollGamepads() {
     const held = new Set();
     this.stick = { x: 0, y: 0 };
     this.padConnected = false;
+    this.pads = [];
     const pads = navigator.getGamepads ? navigator.getGamepads() : [];
     for (const pad of pads) {
       if (!pad) continue;
       this.padConnected = true;
       const ax = pad.axes[0] || 0;
       const ay = pad.axes[1] || 0;
-      if (Math.hypot(ax, ay) > STICK_DEADZONE) this.stick = { x: ax, y: ay };
+      const stick = Math.hypot(ax, ay) > STICK_DEADZONE ? { x: ax, y: ay } : { x: 0, y: 0 };
+      if (stick.x || stick.y) this.stick = stick;
+      const own = new Set();
       pad.buttons.forEach((button, i) => {
-        if (button.pressed && PAD_BUTTONS[i]) held.add(PAD_BUTTONS[i]);
+        if (button.pressed && PAD_BUTTONS[i]) own.add(PAD_BUTTONS[i]);
       });
+      const prev = this.prevPadHeld[pad.index] || new Set();
+      const pressed = new Set([...own].filter((code) => !prev.has(code)));
+      this.prevPadHeld[pad.index] = own;
+      this.pads.push({ stick, held: own, pressed });
+      own.forEach((code) => held.add(code));
     }
     for (const code of held) {
       if (!this.padHeld.has(code)) this.pressed.add(code);
     }
     if (held.size > 0 || this.stick.x || this.stick.y) this.lastDevice = 'pad';
     this.padHeld = held;
+  },
+
+  // Направление с одного геймпада (стик + крестовина).
+  padDirectionOf(i) {
+    const p = this.pads[i];
+    if (!p) return { x: 0, y: 0 };
+    let { x, y } = p.stick;
+    if (p.held.has('PadLeft')) x -= 1;
+    if (p.held.has('PadRight')) x += 1;
+    if (p.held.has('PadUp')) y -= 1;
+    if (p.held.has('PadDown')) y += 1;
+    return this.clampDir(x, y);
+  },
+
+  padPressedOf(i, ...codes) {
+    const p = this.pads[i];
+    return Boolean(p) && codes.some((code) => p.pressed.has(code));
   },
 
   // Текущее нажатие мыши/пальца уже использовано (например, кликом по меню) — его отпускание не считаем.

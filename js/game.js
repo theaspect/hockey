@@ -77,7 +77,7 @@ const PATROL_AMP = 260;
 const PATROL_FREQ = 0.9;
 const PAD_ACTIONS = ['PadA', 'PadB', 'PadX', 'PadY', 'PadRT', 'PadRB'];
 // Кнопка меню, кнопка действия и джойстик привязаны к краям экрана — см. menuButton() / actionButton() / stickHome().
-const VERSION = 'v10'; // показывается в углу экрана; поднимать при каждой выкладке
+const VERSION = 'v11'; // показывается в углу экрана; поднимать при каждой выкладке
 const SLOW_PUCK = 300; // медленную шайбу вратарь берёт просто касанием, без кнопки
 const STICK_RADIUS = 80; // насколько отводить палец экранного джойстика для полной скорости
 const TOUCH_STICK_DEADZONE = 0.15;
@@ -173,8 +173,12 @@ function makePlayer(color, r) {
   return { x: 0, y: 0, vx: 0, vy: 0, fx: 1, fy: 0, r, color, cooldown: 0, swing: 0 };
 }
 
-const goalie = makePlayer('#e53935', GOALIE_R);
-const skater = makePlayer('#1e63d6', SKATER_R);
+const PLAYER_COLORS = ['#e53935', '#1e63d6']; // игрок 0 — красный, игрок 1 — синий
+const goalie = makePlayer(PLAYER_COLORS[0], GOALIE_R);
+const skater = makePlayer(PLAYER_COLORS[1], SKATER_R);
+// «2 игрока»: кто сейчас вратарь (0 или 1) — меняется после каждого гола; голы каждого игрока.
+let goalieOwner = 0;
+const pvpScore = [0, 0];
 const puck = { x: 0, y: 0, vx: 0, vy: 0, owner: null, shot: false, prev: { x: 0, y: 0 } };
 const score = { saves: 0, mine: 0, goals: 0 };
 const glove = { open: 0, cooldown: 0 };
@@ -302,6 +306,10 @@ function followWrap(speed, dt) {
 // ---------- Партия ----------
 
 function faceoff() {
+  // Форма — по игроку: в «2 игрока» красный остаётся красным, кем бы он ни играл.
+  const owner = mode === 'pvp' ? goalieOwner : 0;
+  goalie.color = PLAYER_COLORS[owner];
+  skater.color = PLAYER_COLORS[1 - owner];
   Object.assign(goalie, { x: RINK.leftGoalX + 60, y: RINK.cy, fx: 1, fy: 0, cooldown: 0 });
   Object.assign(skater, { x: RINK.cx, y: RINK.cy, fx: -1, fy: 0, cooldown: 0 });
   Object.assign(puck, holdPoint(skater), { vx: 0, vy: 0, owner: skater, shot: false });
@@ -315,6 +323,9 @@ function newGame(newMode) {
   score.saves = 0;
   score.mine = 0;
   score.goals = 0;
+  goalieOwner = 0;
+  pvpScore[0] = 0;
+  pvpScore[1] = 0;
   saveFlash = 0;
   glove.open = 0;
   glove.cooldown = 0;
@@ -369,37 +380,75 @@ function touchStick() {
   return { base, knob, dir };
 }
 
+// ---------- Режим «2 игрока»: у каждого игрока своё управление ----------
+// Игрок 0 — красный, игрок 1 — синий. Кто из них вратарь, меняется после каждого гола (goalieOwner).
+//   2 геймпада: у каждого свой (первый подключённый — игрок 0).
+//   1 геймпад: игрок 0 — геймпад, игрок 1 — клавиатура (стрелки/WASD + пробел/Enter) или мышь.
+//   без геймпада: игрок 0 — WASD + пробел, игрок 1 — стрелки + Enter или мышь.
+// Управление отвечает на три вопроса: куда ехать (dir), действие вратаря (action), бросок нападающего (shot).
+// Мышь: держать кнопку — ехать к курсору; у вратаря нажатие — действие, у нападающего отпускание — бросок.
+function padControls(i) {
+  const act = () => Input.padPressedOf(i, ...PAD_ACTIONS);
+  return { dir: () => Input.padDirectionOf(i), action: act, shot: act, usesPointer: false };
+}
+
+function keyboardControls(dir, keys, usesPointer) {
+  const pressed = () => Input.wasPressed(...keys);
+  return {
+    dir,
+    action: () => pressed() || (usesPointer && Input.pointer.pressed),
+    shot: () => pressed() || (usesPointer && Input.pointer.released),
+    usesPointer,
+  };
+}
+
+function controlsOf(player) {
+  const pads = Input.pads.length;
+  if (pads >= 2) return padControls(player);
+  if (pads === 1) {
+    if (player === 0) return padControls(0);
+    return keyboardControls(() => Input.keyDirection(), ['Space', 'Enter'], true);
+  }
+  if (player === 0) return keyboardControls(() => Input.wasdDirection(), ['Space'], false);
+  return keyboardControls(() => Input.arrowsDirection(), ['Enter'], true);
+}
+
+function goalieControls() {
+  return controlsOf(goalieOwner);
+}
+
+function skaterControls() {
+  return controlsOf(1 - goalieOwner);
+}
+
 function goalieDirection() {
   const stick = touchStick();
   if (stick) return stick.dir;
   if (mode === 'pvc') return Input.direction();
-  if (Input.padConnected) return Input.padDirection();
-  return Input.wasdDirection();
+  return goalieControls().dir();
 }
 
 function goalieMoveTarget() {
-  if (mode !== 'pvc' || stickTouch()) return null;
+  if (mode === 'pvp') return goalieControls().usesPointer && Input.pointer.down ? toWorld(Input.pointer) : null;
+  if (stickTouch()) return null;
   if (Input.lastDevice === 'mouse') return toWorld(Input.mouse);
   return null;
 }
 
 // Одна кнопка действия: без шайбы — ловить, с шайбой — бросать.
 function goalieAction() {
+  if (mode === 'pvp') return goalieControls().action();
   if (Input.wasPressed(...PAD_ACTIONS)) return true;
-  if (mode === 'pvc') {
-    if (Input.wasPressed('Space', 'Enter')) return true;
-    return Input.taps.some((t) => t.type === 'mouse' || !onLeftHalf(t));
-  }
-  return !Input.padConnected && Input.wasPressed('Space');
+  if (Input.wasPressed('Space', 'Enter')) return true;
+  return Input.taps.some((t) => t.type === 'mouse' || !onLeftHalf(t));
 }
 
 function skaterDirection() {
-  return Input.padConnected ? Input.keyDirection() : Input.arrowsDirection();
+  return skaterControls().dir();
 }
 
 function skaterWantsShot() {
-  if (Input.pointer.released) return true;
-  return Input.padConnected ? Input.wasPressed('Space', 'Enter') : Input.wasPressed('Enter');
+  return skaterControls().shot();
 }
 
 // ---------- Движение ----------
@@ -576,7 +625,7 @@ function updateAiSkater(dt) {
 }
 
 function updateHumanSkater(dt) {
-  if (Input.pointer.down) {
+  if (skaterControls().usesPointer && Input.pointer.down) {
     const t = toWorld(Input.pointer);
     moveToward(skater, t.x, t.y, humanSkaterSpeed(), dt);
   } else {
@@ -816,7 +865,19 @@ function updatePuck(dt) {
 
 // ---------- Голы ----------
 
+// «2 игрока»: гол — праздник для того, кто забил, и потом игроки меняются ролями.
+function pvpGoal(scorer) {
+  pvpScore[scorer] += 1;
+  state = 'goal';
+  goalInfo = { mine: false, pvpScorer: scorer, timer: 3 };
+  Effects.rain(100);
+  Sound.tone(196, 1.0, 'sawtooth', 0, 0.12);
+  Sound.tone(247, 1.0, 'sawtooth', 0, 0.12);
+  Sound.melody([523, 659, 784, 1047], 0.12, 'square', 0.12);
+}
+
 function letIn() {
+  if (mode === 'pvp') return pvpGoal(1 - goalieOwner);
   score.goals += 1;
   state = 'goal';
   goalInfo = { mine: false, timer: 1.8 };
@@ -825,6 +886,7 @@ function letIn() {
 
 // Вратарь забросил через всю площадку — праздник!
 function goalieScored() {
+  if (mode === 'pvp') return pvpGoal(goalieOwner);
   score.mine += 1;
   state = 'goal';
   goalInfo = { mine: true, timer: 3 };
@@ -989,6 +1051,7 @@ function update(dt) {
     goalInfo.timer -= dt;
     if (goalInfo.timer > 0) return;
     state = 'play';
+    if (mode === 'pvp') goalieOwner = 1 - goalieOwner; // меняемся ролями
     faceoff();
     return;
   }
@@ -1274,6 +1337,14 @@ function drawScore() {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   const y = view.screen.top + 48;
+  if (mode === 'pvp') {
+    // «2 игрока»: голы каждого игрока, цвет — по игроку (не по роли).
+    drawBadge(RINK.cx - 70, y, PLAYER_COLORS[0], pvpScore[0]);
+    drawBadge(RINK.cx + 70, y, PLAYER_COLORS[1], pvpScore[1]);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(':', RINK.cx, y - 4);
+    return;
+  }
   drawBadge(RINK.cx - 70, y, goalie.color, score.mine);
   drawBadge(RINK.cx + 70, y, skater.color, score.goals);
   ctx.fillStyle = '#ffffff';
@@ -1329,6 +1400,34 @@ function drawGoalText(time) {
   ctx.restore();
 }
 
+// «2 игрока»: «ГОЛ!» цветом забившего и «Меняемся!» — дальше роли поменяются.
+function drawSwapText(time, scorer) {
+  const pulse = 1 + 0.06 * Math.sin(time * 10);
+  ctx.save();
+  ctx.translate(RINK.cx, RINK.cy - 60);
+  ctx.scale(pulse, pulse);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold 200px sans-serif';
+  ctx.lineWidth = 16;
+  ctx.strokeStyle = '#ffffff';
+  ctx.strokeText('ГОЛ!', 0, 0);
+  ctx.fillStyle = PLAYER_COLORS[scorer];
+  ctx.fillText('ГОЛ!', 0, 0);
+  ctx.restore();
+
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold 80px sans-serif';
+  ctx.lineWidth = 10;
+  ctx.strokeStyle = '#263859';
+  ctx.strokeText('🔄 Меняемся!', RINK.cx, RINK.cy + 120);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText('🔄 Меняемся!', RINK.cx, RINK.cy + 120);
+  ctx.restore();
+}
+
 function drawPlayIcon(x, y, size) {
   ctx.fillStyle = '#ffffff';
   ctx.beginPath();
@@ -1378,12 +1477,12 @@ function drawMenuIcon(icon, x, y) {
     return;
   }
   if (icon === 'pvc') {
-    drawHead(x - 22, y, 28, goalie.color);
+    drawHead(x - 22, y, 28, PLAYER_COLORS[0]);
     drawRobot(x + 34, y, 24);
     return;
   }
-  drawHead(x - 22, y, 28, goalie.color);
-  drawHead(x + 34, y, 28, skater.color);
+  drawHead(x - 22, y, 28, PLAYER_COLORS[0]);
+  drawHead(x + 34, y, 28, PLAYER_COLORS[1]);
 }
 
 function drawOverlay() {
@@ -1479,6 +1578,7 @@ function draw(time) {
   drawSaveFlash();
   Effects.draw(ctx);
   if (state === 'goal' && goalInfo.mine) drawGoalText(time);
+  if (state === 'goal' && goalInfo.pvpScorer !== undefined) drawSwapText(time, goalInfo.pvpScorer);
   if (state === 'menu') drawMenu(time);
 }
 
