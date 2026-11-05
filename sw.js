@@ -1,11 +1,12 @@
 // Офлайн-режим: все файлы игры кладутся в кэш. Сначала пробуем сеть (чтобы обновления доходили),
 // без сети — берём из кэша. При изменении списка файлов поднимать версию.
-const CACHE = 'hockey-v1';
+const CACHE = 'hockey-v2';
 const FILES = [
   './',
   'index.html',
   'style.css',
   'manifest.webmanifest',
+  'js/compat.js',
   'js/input.js',
   'js/sound.js',
   'js/rink.js',
