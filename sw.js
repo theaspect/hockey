@@ -1,6 +1,6 @@
 // Офлайн-режим: все файлы игры кладутся в кэш. Сначала пробуем сеть (чтобы обновления доходили),
 // без сети — берём из кэша. При изменении списка файлов поднимать версию.
-const CACHE = 'hockey-v3';
+const CACHE = 'hockey-v4';
 const FILES = [
   './',
   'index.html',
@@ -31,8 +31,9 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
+  // cache: 'no-cache' — всегда сверяться с сайтом (GitHub разрешает браузеру 10 минут держать старые файлы).
   e.respondWith(
-    fetch(e.request)
+    fetch(e.request, { cache: 'no-cache' })
       .then((response) => {
         const copy = response.clone();
         caches.open(CACHE).then((cache) => cache.put(e.request, copy));

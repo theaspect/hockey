@@ -77,17 +77,37 @@ const PATROL_AMP = 260;
 const PATROL_FREQ = 0.9;
 const PAD_ACTIONS = ['PadA', 'PadB', 'PadX', 'PadY', 'PadRT', 'PadRB'];
 const MENU_BUTTON = { x: 50, y: 48, r: 32 };
+const VERSION = 'v8'; // показывается в углу экрана; поднимать при каждой выкладке
 const ACTION_BUTTON = { x: WORLD.w - 130, y: WORLD.h - 130, r: 90 }; // кнопка «поймать/бросить» на планшете
 const SLOW_PUCK = 300; // медленную шайбу вратарь берёт просто касанием, без кнопки
 
-// Игра всегда альбомная. Если экран стоит вертикально (iPad не даёт странице запретить поворот),
-// рисуем всё повёрнутым на 90° — картинка остаётся альбомной и занимает весь экран.
+// Игра всегда альбомная, и поворот iPad на неё не влияет (страница не может запретить поворот экрана).
+// Если система повернула экран в портрет, мы поворачиваем картинку обратно — в ту сторону, чтобы игра
+// осталась на месте относительно рук (по углу поворота экрана и последней альбомной ориентации).
 // Размер холста задаём точно в пикселях окна: в Safari 100vh больше видимой области и картинка сплющивалась.
+let lastLandscapeAngle = 90;
+
+// Угол поворота экрана: iOS — window.orientation (0, 90, -90, 180), остальные — screen.orientation.angle.
+function screenAngle() {
+  if (typeof window.orientation === 'number') return window.orientation;
+  const a = window.screen.orientation ? window.screen.orientation.angle : 0;
+  return a > 180 ? a - 360 : a;
+}
+
+function normalizeAngle(a) {
+  return ((((a + 180) % 360) + 360) % 360) - 180;
+}
+
 function resize() {
   const w = window.innerWidth;
   const h = window.innerHeight;
+  const angle = screenAngle();
   view.w = w;
+  view.h = h;
   view.rotated = h > w;
+  if (!view.rotated && Math.abs(angle) === 90) lastLandscapeAngle = angle;
+  // 1 — крутим картинку по часовой, -1 — против часовой.
+  view.turn = normalizeAngle(angle - lastLandscapeAngle) > 0 ? 1 : -1;
   view.dpr = window.devicePixelRatio || 1;
   canvas.width = Math.round(w * view.dpr);
   canvas.height = Math.round(h * view.dpr);
@@ -105,8 +125,14 @@ if (window.visualViewport) window.visualViewport.addEventListener('resize', resi
 resize();
 
 // Точка экрана → точка «альбомного» экрана (с учётом поворота) → координаты игры.
+function toLandscape(p) {
+  if (!view.rotated) return p;
+  if (view.turn > 0) return { x: p.y, y: view.w - p.x };
+  return { x: view.h - p.y, y: p.x };
+}
+
 function toWorld(p) {
-  const l = view.rotated ? { x: p.y, y: view.w - p.x } : p;
+  const l = toLandscape(p);
   return { x: (l.x - view.ox) / view.scale, y: (l.y - view.oy) / view.scale };
 }
 
@@ -1086,6 +1112,15 @@ function drawScore() {
   ctx.fillText(String(score.saves), RINK.cx - 285, 50);
 }
 
+// Номер версии мелко в правом верхнем углу — чтобы видеть, обновилась ли игра на iPad.
+function drawVersion() {
+  ctx.fillStyle = 'rgba(255,255,255,0.4)';
+  ctx.font = '20px sans-serif';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'top';
+  ctx.fillText(VERSION, WORLD.w - 12, 8);
+}
+
 function drawMenuButton() {
   const { x, y, r } = MENU_BUTTON;
   ctx.fillStyle = 'rgba(255,255,255,0.2)';
@@ -1216,8 +1251,9 @@ function draw(time) {
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   const d = view.dpr;
-  if (view.rotated) ctx.setTransform(0, d, -d, 0, view.w * d, 0); // поворот на 90° по часовой
-  else ctx.setTransform(d, 0, 0, d, 0, 0);
+  if (!view.rotated) ctx.setTransform(d, 0, 0, d, 0, 0);
+  else if (view.turn > 0) ctx.setTransform(0, d, -d, 0, view.w * d, 0); // на 90° по часовой
+  else ctx.setTransform(0, -d, d, 0, 0, view.h * d); // на 90° против часовой
   ctx.transform(view.scale, 0, 0, view.scale, view.ox, view.oy);
 
   drawRink(ctx);
@@ -1229,6 +1265,7 @@ function draw(time) {
   drawPuck();
   drawScore();
   drawMenuButton();
+  drawVersion();
   drawTouchMarker();
   drawActionButton(time);
   drawSaveFlash();
