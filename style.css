@@ -2,9 +2,13 @@ html, body {
   margin: 0;
   height: 100%;
   overflow: hidden;
-  background: #87ceeb;
+  background: #24375e;
   touch-action: none;
   user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
 }
 
 canvas {

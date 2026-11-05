@@ -27,5 +27,7 @@ const Sound = {
   },
 };
 
-window.addEventListener('pointerdown', () => Sound.unlock());
-window.addEventListener('keydown', () => Sound.unlock());
+// На iPad звук иногда разрешается только на отпускание пальца — слушаем и его.
+for (const event of ['pointerdown', 'pointerup', 'touchend', 'keydown']) {
+  window.addEventListener(event, () => Sound.unlock());
+}
