@@ -77,7 +77,7 @@ const PATROL_AMP = 260;
 const PATROL_FREQ = 0.9;
 const PAD_ACTIONS = ['PadA', 'PadB', 'PadX', 'PadY', 'PadRT', 'PadRB'];
 // Кнопка меню, кнопки действия и джойстики привязаны к краям экрана — см. menuButton() / actionButtonOf() / stickHomeOf().
-const VERSION = 'v14'; // показывается в углу экрана; поднимать при каждой выкладке
+const VERSION = 'v15'; // показывается в углу экрана; поднимать при каждой выкладке
 const SLOW_PUCK = 300; // медленную шайбу вратарь берёт просто касанием, без кнопки
 const STICK_RADIUS = 80; // насколько отводить палец экранного джойстика для полной скорости
 const TOUCH_STICK_DEADZONE = 0.15;
@@ -288,7 +288,7 @@ function pickShotSpot(faked = false) {
 function makeWrapRoute() {
   const { leftGoalX: gx, cy, goalHalf, goalDepth } = RINK;
   const s = skater.y >= cy ? 1 : -1; // заезжаем с той стороны, где уже едем
-  const behindX = gx - goalDepth - 60;
+  const behindX = gx - goalDepth - RINK.goalOffset / 2 + goalDepth / 2; // посередине проезда за сеткой
   return {
     side: s,
     timer: 7,
@@ -1347,7 +1347,7 @@ function drawPlayer(p, time) {
   ctx.arc(x, y, r, 0, Math.PI * 2);
   ctx.fill();
   drawCircle(ctx, x, y, r, '#ffffff', 4);
-  drawNameRing(p, nameOf(p), readerUpAngle(p));
+  drawNameRing(p, nameOf(p));
 
   // Шлем с глазками — смотрит туда же, куда игрок.
   const hx = x + fx * 4;
@@ -1382,23 +1382,14 @@ function nameOf(p) {
   return Names.get(ownerOf(p));
 }
 
-// Куда «вверх» для того, кто читает имя (угол на площадке). На планшете вдвоём каждый сидит
-// у своего узкого края за своими воротами: игрок 0 — слева (его «вверх» — вправо), игрок 1 — справа.
-// Иначе все смотрят на экран как обычно.
-function readerUpAngle(p) {
-  if (!tabletDuel()) return -Math.PI / 2;
-  const screenUp = ownerOf(p) === 0 ? 0 : Math.PI;
-  return flipped() ? screenUp + Math.PI : screenUp;
-}
-
-// Имя по кругу на спине, между шлемом и краем формы. Дуга — сверху для читающего,
-// буквы идут слева направо и смотрят «головой» наружу, так что читается без поворота головы.
-function drawNameRing(p, name, upAngle) {
+// Имя по кругу на спине: дуга всегда сзади шлема и поворачивается вместе с игроком.
+// Читается тем, кто смотрит игроку в спину: буквы слева направо, «головой» к центру.
+function drawNameRing(p, name) {
   const text = name.toUpperCase();
   if (!text) return;
   const radius = p.r * 0.78;
   let size = p.r * 0.34;
-  const maxArc = Math.PI * 2 * radius * 0.85;
+  const maxArc = Math.PI * radius * 1.1; // не больше чем на пол-спины с небольшим
   const measure = () => {
     ctx.font = `bold ${size}px sans-serif`;
     return [...text].map((ch) => ctx.measureText(ch).width + size * 0.08);
@@ -1409,23 +1400,24 @@ function drawNameRing(p, name, upAngle) {
     size *= maxArc / total;
     widths = measure();
   }
-  let angle = upAngle - widths.reduce((a, b) => a + b, 0) / radius / 2;
+  const back = Math.atan2(p.fy, p.fx) + Math.PI;
+  let angle = back + widths.reduce((a, b) => a + b, 0) / radius / 2;
   ctx.save();
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.lineJoin = 'round';
   [...text].forEach((ch, i) => {
-    const a = angle + widths[i] / 2 / radius;
+    const a = angle - widths[i] / 2 / radius;
     ctx.save();
     ctx.translate(p.x + Math.cos(a) * radius, p.y + Math.sin(a) * radius);
-    ctx.rotate(a + Math.PI / 2);
+    ctx.rotate(a - Math.PI / 2);
     ctx.lineWidth = size * 0.25;
     ctx.strokeStyle = 'rgba(0,0,0,0.6)';
     ctx.strokeText(ch, 0, 0);
     ctx.fillStyle = '#ffffff';
     ctx.fillText(ch, 0, 0);
     ctx.restore();
-    angle += widths[i] / radius;
+    angle -= widths[i] / radius;
   });
   ctx.restore();
 }

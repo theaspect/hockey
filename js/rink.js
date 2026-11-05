@@ -10,9 +10,14 @@ const RINK = {
   bottom: 860,
   corner: 160,
   goalHalf: 95, // половина ширины створа
-  goalDepth: 55, // глубина сетки
-  goalOffset: 170, // от торцевого борта до линии ворот
-  creaseR: 120, // радиус синей зоны вратаря перед воротами
+  goalDepth: 50, // глубина сетки
+  goalOffset: 150, // от торцевого борта до линии ворот (за воротами остаётся проезд)
+  creaseR: 105, // радиус синей зоны вратаря перед воротами
+  // Разметка по пропорциям настоящей площадки (60×30 м, в 1 м ≈ 23 точки по длине):
+  blueOffset: 180, // синие линии — от центра (средняя зона узкая, как в НХЛ)
+  faceoffFromGoal: 140, // круги вбрасывания в зонах — от линии ворот к центру
+  faceoffSide: 175, // и от продольной оси вверх/вниз (не задевают синюю зону вратаря)
+  faceoffR: 100, // радиус кругов вбрасывания (и центрального)
 };
 RINK.cx = (RINK.left + RINK.right) / 2;
 RINK.cy = (RINK.top + RINK.bottom) / 2;
@@ -253,8 +258,26 @@ function drawCrease(ctx, x, dir) {
   ctx.stroke();
 }
 
+function drawDot(ctx, x, y, r, color) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+// Круг вбрасывания в зоне: красный круг, точка в центре и «усики» по бокам, как на настоящей площадке.
+function drawFaceoffCircle(ctx, x, y) {
+  const r = RINK.faceoffR;
+  drawCircle(ctx, x, y, r, '#e53935', 4);
+  drawDot(ctx, x, y, 12, '#e53935');
+  for (const sx of [-1, 1]) {
+    for (const sy of [-1, 1]) drawLine(ctx, x + sx * 14, y + sy * r, x + sx * 14, y + sy * (r + 16), '#e53935', 4);
+  }
+}
+
 function drawRink(ctx) {
   const { left, right, top, bottom, corner, cx, cy, leftGoalX, rightGoalX } = RINK;
+  const { blueOffset, faceoffFromGoal, faceoffSide, faceoffR } = RINK;
   const w = right - left;
   const h = bottom - top;
 
@@ -263,22 +286,36 @@ function drawRink(ctx) {
   ctx.roundRect(left, top, w, h, corner);
   ctx.fill();
 
+  // Разметку обрезаем по форме площадки, чтобы линии не вылезали за закруглённые борта.
+  ctx.save();
+  ctx.beginPath();
+  ctx.roundRect(left, top, w, h, corner);
+  ctx.clip();
+
   drawLine(ctx, cx, top, cx, bottom, '#e53935', 10);
-  drawLine(ctx, cx - 300, top, cx - 300, bottom, '#1e63d6', 12);
-  drawLine(ctx, cx + 300, top, cx + 300, bottom, '#1e63d6', 12);
+  drawLine(ctx, cx - blueOffset, top, cx - blueOffset, bottom, '#1e63d6', 14);
+  drawLine(ctx, cx + blueOffset, top, cx + blueOffset, bottom, '#1e63d6', 14);
   drawLine(ctx, leftGoalX, top, leftGoalX, bottom, '#e53935', 4);
   drawLine(ctx, rightGoalX, top, rightGoalX, bottom, '#e53935', 4);
-  drawCircle(ctx, cx, cy, 110, '#1e63d6', 5);
-  ctx.fillStyle = '#1e63d6';
-  ctx.beginPath();
-  ctx.arc(cx, cy, 10, 0, Math.PI * 2);
-  ctx.fill();
 
-  for (const x of [leftGoalX + 170, rightGoalX - 170]) {
-    for (const y of [cy - 210, cy + 210]) drawCircle(ctx, x, y, 80, '#e53935', 4);
+  // Центр: синий круг и точка.
+  drawCircle(ctx, cx, cy, faceoffR, '#1e63d6', 5);
+  drawDot(ctx, cx, cy, 10, '#1e63d6');
+
+  // Точки вбрасывания в средней зоне — у синих линий.
+  for (const sx of [-1, 1]) {
+    for (const sy of [-1, 1]) drawDot(ctx, cx + sx * (blueOffset - 40), cy + sy * faceoffSide, 11, '#e53935');
   }
+
+  // Круги вбрасывания в зонах у ворот.
+  for (const x of [leftGoalX + faceoffFromGoal, rightGoalX - faceoffFromGoal]) {
+    for (const sy of [-1, 1]) drawFaceoffCircle(ctx, x, cy + sy * faceoffSide);
+  }
+
   drawCrease(ctx, leftGoalX, 1);
   drawCrease(ctx, rightGoalX, -1);
+  ctx.restore();
+
   drawNet(ctx, NETS.left);
   drawNet(ctx, NETS.right);
 
