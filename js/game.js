@@ -77,7 +77,7 @@ const PATROL_AMP = 260;
 const PATROL_FREQ = 0.9;
 const PAD_ACTIONS = ['PadA', 'PadB', 'PadX', 'PadY', 'PadRT', 'PadRB'];
 const MENU_BUTTON = { x: 50, y: 48, r: 32 };
-const VERSION = 'v8'; // показывается в углу экрана; поднимать при каждой выкладке
+const VERSION = 'v9'; // показывается в углу экрана; поднимать при каждой выкладке
 const ACTION_BUTTON = { x: WORLD.w - 130, y: WORLD.h - 130, r: 90 }; // кнопка «поймать/бросить» на планшете
 const SLOW_PUCK = 300; // медленную шайбу вратарь берёт просто касанием, без кнопки
 

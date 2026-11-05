@@ -25,8 +25,22 @@
   <script src="js/game.js"></script>
   <script>
     // Офлайн-режим работает только с сайта, не из файла.
+    // Самообновление: при каждом возврате в игру проверяем, нет ли новой версии на сайте;
+    // если есть — новый обработчик берёт управление, и страница один раз перезагружается.
+    // (В режиме приложения на iPad кнопки «Обновить» нет.)
     if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
-      navigator.serviceWorker.register('sw.js');
+      const hadController = Boolean(navigator.serviceWorker.controller);
+      navigator.serviceWorker.register('sw.js').then((registration) => {
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible') registration.update();
+        });
+      });
+      let reloading = false;
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (!hadController || reloading) return;
+        reloading = true;
+        location.reload();
+      });
     }
   </script>
 </body>
