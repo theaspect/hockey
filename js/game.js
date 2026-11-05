@@ -22,15 +22,15 @@ const view = { scale: 1, ox: 0, oy: 0, dpr: 1 };
 const GOALIE_R = 48;
 const SKATER_R = 38;
 const PUCK_R = 14;
-const GOALIE_ZONE = 300; // как далеко вратарь может отъехать от ворот
-const SKATER_MIN_X = RINK.left + 220; // нападающий не лезет во вратарскую зону
+const GOALIE_ZONE = 230; // как далеко вратарь может отъехать вперёд от линии своих ворот
+const CREASE_KEEP_OUT = RINK.creaseR + 20; // нападающий не заезжает в синюю зону вратаря
 const THROW_SPEED = 1500;
 const AUTO_THROW = 5; // через сколько секунд вратарь сам бросит по прицелу
 const MIN_HOLD = 0.3; // сразу после поимки бросить нельзя — чтобы двойное нажатие не выкидывало шайбу
 const GLOVE_COOLDOWN = 0.45; // пауза после попытки, чтобы не ловить «долбёжкой» по кнопке
 const RADAR_AMP = (60 * Math.PI) / 180; // прицел качается на ±60° вокруг ворот — хватает на броски через борт
 const RADAR_BOUNCES = 2; // сколько отскоков от бортов показывает прицел
-const BOARD_BOUNCE_KEEP = 0.85; // сколько скорости шайба сохраняет после удара о борт
+const BOARD_BOUNCE_KEEP = 0.9; // сколько скорости шайба сохраняет после удара о борт
 
 // Уровни сложности (выбираются в меню).
 //   startLevel — с какого уровня начинается игра, growth — сколько уровня даёт одна звезда,
@@ -69,7 +69,7 @@ function difficulty() {
 function catchReach() {
   return GOALIE_R + PUCK_R + difficulty().reach;
 }
-const PUCK_FRICTION = 0.6; // какая доля скорости шайбы остаётся через секунду
+const PUCK_FRICTION = 0.7; // какая доля скорости шайбы остаётся через секунду
 const SLOW_FRICTION = 0.3; // медленная шайба тормозит сильнее и быстро останавливается — её легко подобрать
 const FAST_PUCK = 700; // быструю шайбу нападающему поймать труднее — нужно встать точно на пути
 const PATROL_X = RINK.cx - 150; // где нападающий караулит бросок вратаря
@@ -105,7 +105,7 @@ function makePlayer(color, r) {
 
 const goalie = makePlayer('#e53935', GOALIE_R);
 const skater = makePlayer('#1e63d6', SKATER_R);
-const puck = { x: 0, y: 0, vx: 0, vy: 0, owner: null, shot: false };
+const puck = { x: 0, y: 0, vx: 0, vy: 0, owner: null, shot: false, prev: { x: 0, y: 0 } };
 const score = { saves: 0, mine: 0, goals: 0 };
 const glove = { open: 0, cooldown: 0 };
 const radar = { center: 0, phase: 0 };
@@ -119,6 +119,7 @@ let shotSpot = null;
 let patrolPhase = 0;
 let skaterReaction = 0; // сколько ещё нападающий «соображает» после броска вратаря
 let skaterHeld = 0; // сколько нападающий уже держит шайбу — бросать сразу нельзя
+let wrap = null; // маршрут объезда ворот, если компьютер решил объехать
 
 // ---------- Сложность: всё зависит от количества очков ----------
 
@@ -181,19 +182,57 @@ function fakeChance() {
   return Math.min((level() - 5) * 0.04, 0.45);
 }
 
+// Шанс объезда: нападающий объезжает ворота сзади и бросает с другой стороны.
+function wrapChance() {
+  if (level() < 5) return 0;
+  return Math.min((level() - 5) * 0.04, 0.3);
+}
+
 function pickShotSpot(faked = false) {
   shotSpot = {
-    x: rand(RINK.left + 380, RINK.cx - 150),
+    x: rand(RINK.leftGoalX + 260, RINK.cx - 150),
     y: rand(RINK.top + 120, RINK.bottom - 120),
     timer: faked ? aimTime() / 2 : aimTime(),
     faked,
   };
+  wrap = !faked && Math.random() < wrapChance() ? makeWrapRoute() : null;
+}
+
+// Объезд ворот: подъехать сбоку, проехать за сеткой, выскочить с другой стороны и бросить в ближний угол.
+function makeWrapRoute() {
+  const { leftGoalX: gx, cy, goalHalf, goalDepth } = RINK;
+  const s = skater.y >= cy ? 1 : -1; // заезжаем с той стороны, где уже едем
+  const behindX = gx - goalDepth - 60;
+  return {
+    side: s,
+    timer: 7,
+    route: [
+      { x: gx + 40, y: cy + s * (goalHalf + 130) },
+      { x: behindX, y: cy + s * (goalHalf + 50) },
+      { x: behindX, y: cy - s * (goalHalf + 50) },
+      { x: gx + 60, y: cy - s * (goalHalf + 40) },
+    ],
+  };
+}
+
+// Едет по маршруту объезда. Возвращает true, пока объезд продолжается.
+function followWrap(speed, dt) {
+  wrap.timer -= dt;
+  const target = wrap.route[0];
+  moveToward(skater, target.x, target.y, speed, dt);
+  if (Math.hypot(target.x - skater.x, target.y - skater.y) < 30) wrap.route.shift();
+  if (wrap.route.length > 0 && wrap.timer > 0) return true;
+  const s = wrap.side;
+  wrap = null;
+  if (puck.owner !== skater) return false;
+  skaterShot(RINK.leftGoalX - 30, RINK.cy + s * 10);
+  return true;
 }
 
 // ---------- Партия ----------
 
 function faceoff() {
-  Object.assign(goalie, { x: RINK.left + 90, y: RINK.cy, fx: 1, fy: 0, cooldown: 0 });
+  Object.assign(goalie, { x: RINK.leftGoalX + 60, y: RINK.cy, fx: 1, fy: 0, cooldown: 0 });
   Object.assign(skater, { x: RINK.cx, y: RINK.cy, fx: -1, fy: 0, cooldown: 0 });
   Object.assign(puck, holdPoint(skater), { vx: 0, vy: 0, owner: skater, shot: false });
   skaterHeld = 0;
@@ -307,8 +346,9 @@ function updateGoalie(dt) {
   } else {
     moveByDirection(goalie, goalieDirection(), goalieSpeed(), dt);
   }
-  goalie.x = Math.min(goalie.x, RINK.left + GOALIE_ZONE);
-  collideRink(goalie, GOALIE_R, 0, false);
+  goalie.x = Math.min(goalie.x, RINK.leftGoalX + GOALIE_ZONE);
+  collideRink(goalie, GOALIE_R, 0);
+  collideNets(goalie, GOALIE_R, 0, false);
 
   glove.open -= dt;
   glove.cooldown -= dt;
@@ -338,7 +378,7 @@ function openGlove() {
 // ---------- Прицел-радар ----------
 
 function startRadar() {
-  radar.center = Math.atan2(RINK.cy - goalie.y, RINK.right - goalie.x) + rand(-0.25, 0.25);
+  radar.center = Math.atan2(RINK.cy - goalie.y, RINK.rightGoalX - goalie.x) + rand(-0.25, 0.25);
   radar.phase = Math.random();
 }
 
@@ -357,7 +397,7 @@ function throwOrigin(a) {
 function aimPath(a) {
   const o = throwOrigin(a);
   // Проверяем створ там, где шайба впервые касается линии ворот краем — там же его проверяет физика.
-  return tracePath(o.x, o.y, Math.cos(a), Math.sin(a), PUCK_R, RINK.right - PUCK_R, RADAR_BOUNCES);
+  return tracePath(o.x, o.y, Math.cos(a), Math.sin(a), PUCK_R, RINK.rightGoalX, RADAR_BOUNCES, [NETS.left]);
 }
 
 // Куда попадёт бросок по текущему прицелу (с отскоками от бортов) и в створ ли.
@@ -365,16 +405,37 @@ function radarAim() {
   const angle = radarAngle();
   const path = aimPath(angle);
   const onTarget = path.yHit !== null
-    && Math.abs(path.yHit - RINK.cy) < RINK.goalHalf - PUCK_R + difficulty().aimAssist;
+    && Math.abs(path.yHit - RINK.cy) < RINK.goalHalf - PUCK_R + difficulty().aimAssist
+    && reachesEnd(path.points, THROW_SPEED)
+    && clearsPosts(path.points, NETS.right);
   return { angle, path, onTarget };
+}
+
+// При крутом заходе шайба может задеть штангу, даже если центр проходит в створ.
+function clearsPosts(points, box) {
+  const a = points[points.length - 2];
+  const b = points[points.length - 1];
+  return [box.y0, box.y1].every((y) => distToSegment(box.front, y, a, b) > PUCK_R + 3);
+}
+
+// Долетит ли шайба по пути до конца, не успев сильно затормозить (торможение + потери на отскоках).
+function reachesEnd(points, speed) {
+  const k = -Math.log(PUCK_FRICTION); // при таком торможении скорость падает на k за каждый пиксель пути
+  let v = speed;
+  for (let i = 1; i < points.length; i++) {
+    if (i > 1) v *= BOARD_BOUNCE_KEEP;
+    v -= k * Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+  }
+  return v > SLOW_PUCK + 100;
 }
 
 // Зелёный прицел прощает маленький промах: ищем ближайший угол, при котором шайба точно в створе.
 function correctedAngle(a) {
   const inner = RINK.goalHalf - PUCK_R - 16; // запас от штанги
   const inside = (angle) => {
-    const { yHit } = aimPath(angle);
-    return yHit !== null && Math.abs(yHit - RINK.cy) < inner;
+    const path = aimPath(angle);
+    return path.yHit !== null && Math.abs(path.yHit - RINK.cy) < inner
+      && reachesEnd(path.points, THROW_SPEED) && clearsPosts(path.points, NETS.right);
   };
   for (let d = 0; d <= 0.15; d += 0.001) {
     if (inside(a + d)) return a + d;
@@ -408,9 +469,10 @@ function updateAiSkater(dt) {
     moveToward(skater, target.x, target.y, speed, dt);
     return;
   }
+  skaterHeld += dt;
+  if (wrap && followWrap(speed, dt)) return;
   moveToward(skater, shotSpot.x, shotSpot.y, speed, dt);
   shotSpot.timer -= dt;
-  skaterHeld += dt;
   if (skaterHeld < minSkaterHold()) return; // пауза: вратарь успевает приготовиться
   const arrived = Math.hypot(shotSpot.x - skater.x, shotSpot.y - skater.y) < 20;
   if (!arrived && shotSpot.timer > 0) return;
@@ -435,8 +497,20 @@ function updateHumanSkater(dt) {
 function updateSkater(dt) {
   if (skaterIsHuman()) updateHumanSkater(dt);
   else updateAiSkater(dt);
-  skater.x = Math.max(skater.x, SKATER_MIN_X);
-  collideRink(skater, SKATER_R, 0, false);
+  keepOutOfCrease(skater);
+  collideRink(skater, SKATER_R, 0);
+  collideNets(skater, SKATER_R, 0, false);
+}
+
+// Нападающий не заезжает в синюю зону перед воротами вратаря (за ворота — можно).
+function keepOutOfCrease(p) {
+  const dx = p.x - RINK.leftGoalX;
+  const dy = p.y - RINK.cy;
+  if (dx < 0) return;
+  const dist = Math.hypot(dx, dy) || 1;
+  if (dist >= CREASE_KEEP_OUT) return;
+  p.x = RINK.leftGoalX + (dx / dist) * CREASE_KEEP_OUT;
+  p.y = RINK.cy + (dy / dist) * CREASE_KEEP_OUT;
 }
 
 function separate(a, b) {
@@ -495,11 +569,11 @@ function aiShotOptions() {
   const options = [];
   for (let i = -2; i <= 2; i++) {
     const ty = RINK.cy + (inner * i) / 2;
-    const goalPoint = { x: RINK.left, y: ty };
-    options.push({ aim: { x: RINK.left - 30, y: ty }, points: [from, goalPoint] });
+    const goalPoint = { x: RINK.leftGoalX, y: ty };
+    options.push({ aim: { x: RINK.leftGoalX - 30, y: ty }, points: [from, goalPoint] });
     if (!allowBank) continue;
     for (const wall of [-1, 1]) {
-      const bank = bankTarget(from.x, from.y, RINK.left, ty, wall, PUCK_R);
+      const bank = bankTarget(from.x, from.y, RINK.leftGoalX, ty, wall, PUCK_R);
       if (bank) options.push({ aim: bank, points: [from, bank.bounce, goalPoint] });
     }
   }
@@ -527,7 +601,7 @@ function humanShoot() {
     skaterShot(puck.x + skater.fx * 1000, puck.y + skater.fy * 1000);
     return;
   }
-  skaterShot(RINK.left - 30, RINK.cy);
+  skaterShot(RINK.leftGoalX - 30, RINK.cy);
 }
 
 function holdPoint(p) {
@@ -615,11 +689,12 @@ function skaterPickup() {
 }
 
 function updatePuck(dt) {
+  puck.prev = { x: puck.x, y: puck.y };
   if (puck.owner) {
     const p = holdPoint(puck.owner);
     puck.x = p.x;
     puck.y = p.y;
-    collideRink(puck, PUCK_R, 0, false);
+    collideRink(puck, PUCK_R, 0);
   } else {
     puck.x += puck.vx * dt;
     puck.y += puck.vy * dt;
@@ -633,7 +708,9 @@ function updatePuck(dt) {
       puck.vy = 0;
     }
     // Отскок зеркальный (угол падения = углу отражения), чтобы броски через борт были предсказуемыми.
-    if (collideRink(puck, PUCK_R, 1, true)) {
+    const hitBoards = collideRink(puck, PUCK_R, 1);
+    const hitNet = collideNets(puck, PUCK_R, 1, true);
+    if (hitBoards || hitNet) {
       puck.vx *= BOARD_BOUNCE_KEEP;
       puck.vy *= BOARD_BOUNCE_KEEP;
       if (speed > 120) Sound.tone(220, 0.05, 'triangle', 0, 0.2);
@@ -658,17 +735,36 @@ function goalieScored() {
   score.mine += 1;
   state = 'goal';
   goalInfo = { mine: true, timer: 3 };
-  Effects.burst(RINK.right, RINK.cy, 120, -1);
+  Effects.burst(RINK.rightGoalX, RINK.cy, 120, -1);
   Effects.rain(120);
   Sound.tone(196, 1.0, 'sawtooth', 0, 0.12);
   Sound.tone(247, 1.0, 'sawtooth', 0, 0.12);
   Sound.melody([523, 659, 784, 1047, 784, 1047], 0.12, 'square', 0.12);
 }
 
+// Шайба зашла в сетку спереди — пересекла линию ворот между штангами (а не проскочила сбоку).
+function enteredThroughMouth(box) {
+  const { x: px, y: py } = puck.prev;
+  if ((px - box.front) * box.dir < 0) return false;
+  const t = (box.front - px) / (puck.x - px || 1e-9);
+  const y = py + (puck.y - py) * t;
+  return y > box.y0 && y < box.y1;
+}
+
 function checkGoal() {
-  // Гол — когда центр шайбы пересёк линию ворот.
-  if (puck.x < RINK.left) return letIn();
-  if (puck.x > RINK.right) goalieScored();
+  if (puck.owner) return;
+  const side = puckInNet(puck.x, puck.y);
+  if (!side) return;
+  const box = NETS[side];
+  if (!enteredThroughMouth(box)) {
+    // Влетела в сетку сбоку или сзади — отскакивает.
+    pushOutOfBox(puck, PUCK_R, box);
+    puck.vx *= -0.5;
+    puck.vy *= -0.5;
+    return;
+  }
+  if (side === 'left') letIn();
+  else goalieScored();
 }
 
 // ---------- Меню ----------
