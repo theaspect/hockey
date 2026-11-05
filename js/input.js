@@ -132,7 +132,7 @@ window.addEventListener('blur', () => {
 window.addEventListener('pointerdown', (e) => {
   const type = deviceOf(e);
   Input.lastDevice = type;
-  Input.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, type, startX: e.clientX, startY: e.clientY });
+  Input.pointers.set(e.pointerId, { id: e.pointerId, x: e.clientX, y: e.clientY, type, startX: e.clientX, startY: e.clientY });
   Input.taps.push({ id: e.pointerId, x: e.clientX, y: e.clientY, type });
   Object.assign(Input.pointer, { x: e.clientX, y: e.clientY, down: true, pressed: true });
 });

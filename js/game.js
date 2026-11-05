@@ -76,10 +76,12 @@ const PATROL_X = RINK.cx - 150; // где нападающий караулит 
 const PATROL_AMP = 260;
 const PATROL_FREQ = 0.9;
 const PAD_ACTIONS = ['PadA', 'PadB', 'PadX', 'PadY', 'PadRT', 'PadRB'];
-const MENU_BUTTON = { x: 50, y: 48, r: 32 };
-const VERSION = 'v9'; // показывается в углу экрана; поднимать при каждой выкладке
-const ACTION_BUTTON = { x: WORLD.w - 130, y: WORLD.h - 130, r: 90 }; // кнопка «поймать/бросить» на планшете
+// Кнопка меню, кнопка действия и джойстик привязаны к краям экрана — см. menuButton() / actionButton() / stickHome().
+const VERSION = 'v10'; // показывается в углу экрана; поднимать при каждой выкладке
 const SLOW_PUCK = 300; // медленную шайбу вратарь берёт просто касанием, без кнопки
+const STICK_RADIUS = 80; // насколько отводить палец экранного джойстика для полной скорости
+const TOUCH_STICK_DEADZONE = 0.15;
+const SWING_TIME = 0.35; // длительность замаха клюшкой при броске
 
 // Игра всегда альбомная, и поворот iPad на неё не влияет (страница не может запретить поворот экрана).
 // Если система повернула экран в портрет, мы поворачиваем картинку обратно — в ту сторону, чтобы игра
@@ -115,9 +117,35 @@ function resize() {
   canvas.style.height = `${h}px`;
   const lw = view.rotated ? h : w; // размеры «альбомного» экрана
   const lh = view.rotated ? w : h;
-  view.scale = Math.min(lw / WORLD.w, lh / WORLD.h);
-  view.ox = (lw - WORLD.w * view.scale) / 2;
-  view.oy = (lh - WORLD.h * view.scale) / 2;
+  // Масштаб — по самой площадке (плюс место для табло сверху), остальное поле экрана — просто фон.
+  const c = CONTENT;
+  view.scale = Math.min(lw / (c.x1 - c.x0), lh / (c.y1 - c.y0));
+  view.ox = lw / 2 - ((c.x0 + c.x1) / 2) * view.scale;
+  view.oy = lh / 2 - ((c.y0 + c.y1) / 2) * view.scale;
+  // Края экрана в координатах игры — к ним привязаны табло, меню, джойстик и кнопка действия.
+  view.screen = {
+    left: -view.ox / view.scale,
+    top: -view.oy / view.scale,
+    right: (lw - view.ox) / view.scale,
+    bottom: (lh - view.oy) / view.scale,
+  };
+}
+
+// Что обязательно должно влезть в экран: площадка и полоса для табло над ней.
+const CONTENT = { x0: RINK.left - 16, x1: RINK.right + 16, y0: RINK.top - 92, y1: RINK.bottom + 16 };
+
+function menuButton() {
+  return { x: view.screen.left + 50, y: view.screen.top + 48, r: 32 };
+}
+
+// Кнопка «поймать/бросить» на планшете — в правом нижнем углу экрана.
+function actionButton() {
+  return { x: view.screen.right - 130, y: view.screen.bottom - 130, r: 90 };
+}
+
+// Где рисуется подсказка джойстика, пока пальца нет, — левый нижний угол экрана.
+function stickHome() {
+  return { x: view.screen.left + 150, y: view.screen.bottom - 150 };
 }
 window.addEventListener('resize', resize);
 window.addEventListener('orientationchange', () => setTimeout(resize, 200));
@@ -141,7 +169,8 @@ function rand(min, max) {
 }
 
 function makePlayer(color, r) {
-  return { x: 0, y: 0, vx: 0, vy: 0, fx: 1, fy: 0, r, color, cooldown: 0 };
+  // swing: 1 → 0 — идёт замах клюшкой после броска.
+  return { x: 0, y: 0, vx: 0, vy: 0, fx: 1, fy: 0, r, color, cooldown: 0, swing: 0 };
 }
 
 const goalie = makePlayer('#e53935', GOALIE_R);
@@ -300,35 +329,56 @@ function skaterIsHuman() {
   return mode === 'pvp';
 }
 
+// Планшет (режим 1 игрок), управление двумя большими пальцами:
+//   левая половина экрана — джойстик: где коснулся, там его основание, отклонение пальца = направление и скорость;
+//   правая половина — действие (кнопка 🧤/🏒 справа внизу — просто подсказка, нажимать можно где угодно справа).
+// Поворачивать вратаря не нужно: он сам смотрит на шайбу, а бросок идёт по прицелу.
+// Мышь: вратарь едет за курсором, клик — действие.
+function showTouchControls() {
+  return mode === 'pvc' && Input.lastDevice === 'touch';
+}
+
+function onLeftHalf(screenPoint) {
+  return toWorld(screenPoint).x < WORLD.w / 2;
+}
+
+// Палец джойстика: первый, что опустили на левую половину экрана.
+function stickTouch() {
+  for (const p of Input.pointers.values()) {
+    if (p.type === 'touch' && onLeftHalf({ x: p.startX, y: p.startY })) return p;
+  }
+  return null;
+}
+
+// Джойстик: { base, knob, dir } в координатах игры или null, если пальца нет.
+function touchStick() {
+  if (mode !== 'pvc') return null;
+  const touch = stickTouch();
+  if (!touch) return null;
+  const base = toWorld({ x: touch.startX, y: touch.startY });
+  const finger = toWorld(touch);
+  let dx = (finger.x - base.x) / STICK_RADIUS;
+  let dy = (finger.y - base.y) / STICK_RADIUS;
+  const len = Math.hypot(dx, dy);
+  if (len > 1) {
+    dx /= len;
+    dy /= len;
+  }
+  const knob = { x: base.x + dx * STICK_RADIUS, y: base.y + dy * STICK_RADIUS };
+  const dir = len < TOUCH_STICK_DEADZONE ? { x: 0, y: 0 } : { x: dx, y: dy };
+  return { base, knob, dir };
+}
+
 function goalieDirection() {
+  const stick = touchStick();
+  if (stick) return stick.dir;
   if (mode === 'pvc') return Input.direction();
   if (Input.padConnected) return Input.padDirection();
   return Input.wasdDirection();
 }
 
-// На планшете (режим 1 игрок): палец в любом месте — вратарь едет к пальцу,
-// большая кнопка в правом нижнем углу — действие. Мышь: вратарь едет за курсором, клик — действие.
-function showActionButton() {
-  return mode === 'pvc' && Input.lastDevice === 'touch';
-}
-
-function onActionButton(screenPoint) {
-  const w = toWorld(screenPoint);
-  return Math.hypot(w.x - ACTION_BUTTON.x, w.y - ACTION_BUTTON.y) < ACTION_BUTTON.r + 20;
-}
-
-// Палец, который двигает вратаря: первый, что опустили не на кнопку действия.
-function movingTouch() {
-  for (const p of Input.pointers.values()) {
-    if (p.type === 'touch' && !onActionButton({ x: p.startX, y: p.startY })) return p;
-  }
-  return null;
-}
-
 function goalieMoveTarget() {
-  if (mode !== 'pvc') return null;
-  const touch = movingTouch();
-  if (touch) return toWorld(touch);
+  if (mode !== 'pvc' || stickTouch()) return null;
   if (Input.lastDevice === 'mouse') return toWorld(Input.mouse);
   return null;
 }
@@ -338,7 +388,7 @@ function goalieAction() {
   if (Input.wasPressed(...PAD_ACTIONS)) return true;
   if (mode === 'pvc') {
     if (Input.wasPressed('Space', 'Enter')) return true;
-    return Input.taps.some((t) => t.type === 'mouse' || onActionButton(t));
+    return Input.taps.some((t) => t.type === 'mouse' || !onLeftHalf(t));
   }
   return !Input.padConnected && Input.wasPressed('Space');
 }
@@ -491,6 +541,7 @@ function shootByRadar() {
   Object.assign(puck, throwOrigin(a));
   launchPuck(puck.x + Math.cos(a) * 1000, puck.y + Math.sin(a) * 1000, THROW_SPEED);
   goalie.cooldown = 0.5;
+  goalie.swing = 1;
   skater.cooldown = 0; // нападающий может перехватить бросок вратаря сразу
   skaterReaction = reactionTime();
 }
@@ -584,6 +635,7 @@ function skaterShot(tx, ty) {
   launchPuck(tx, ty, shotSpeed());
   puck.shot = true;
   skater.cooldown = 0.6;
+  skater.swing = 1;
 }
 
 function distToSegment(px, py, a, b) {
@@ -816,13 +868,18 @@ const MODE_ITEMS = [
   { icon: 'pvc', label: '1 игрок', color: '#fb8c00', action: () => newGame('pvc') },
   { icon: 'pvp', label: '2 игрока', color: '#8e24aa', action: () => newGame('pvp') },
 ];
-// Сложность переключается по кругу нажатием (или влево/вправо) и сразу действует, игру не перезапускает.
+// Сложность — ряд из трёх кнопок (Легко / Средне / Трудно), все видны сразу. Нажатие выбирает уровень;
+// с клавиатуры/геймпада — влево/вправо, Enter переключает по кругу. Игру не перезапускает.
 const DIFFICULTY_ITEM = {
   icon: 'difficulty',
-  get label() { return difficulty().label; },
-  get color() { return difficulty().color; },
   action: () => setDifficulty(difficultyIndex + 1),
 };
+
+function difficultyRect(row, i) {
+  const gap = 16;
+  const w = (row.w - gap * (DIFFICULTIES.length - 1)) / DIFFICULTIES.length;
+  return { x: row.x + i * (w + gap), y: row.y, w, h: row.h };
+}
 let menuIndex = 0;
 
 function menuItems() {
@@ -850,7 +907,7 @@ function pointInRect(p, r) {
 function menuButtonClicked() {
   if (!Input.pointer.pressed) return false;
   const p = toWorld(Input.pointer);
-  return Math.hypot(p.x - MENU_BUTTON.x, p.y - MENU_BUTTON.y) < MENU_BUTTON.r + 10;
+  return Math.hypot(p.x - menuButton().x, p.y - menuButton().y) < menuButton().r + 10;
 }
 
 function openMenu() {
@@ -890,7 +947,15 @@ function updateMenu() {
   if (!Input.pointer.pressed) return;
   const p = toWorld(Input.pointer);
   const hit = items.findIndex((_, i) => pointInRect(p, menuItemRect(i)));
-  if (hit >= 0) chooseMenuItem(hit);
+  if (hit < 0) return;
+  if (items[hit] !== DIFFICULTY_ITEM) return chooseMenuItem(hit);
+  const row = menuItemRect(hit);
+  const level = DIFFICULTIES.findIndex((_, i) => pointInRect(p, difficultyRect(row, i)));
+  if (level < 0) return;
+  menuIndex = hit;
+  setDifficulty(level);
+  Input.swallowPointer();
+  Sound.tone(800, 0.08, 'triangle', 0, 0.15);
 }
 
 // Стик в меню: один шаг на одно отклонение.
@@ -909,6 +974,8 @@ function update(dt) {
   if (Input.anyPress()) Sound.unlock();
   Effects.update(dt);
   saveFlash = Math.max(0, saveFlash - dt);
+  goalie.swing = Math.max(0, goalie.swing - dt / SWING_TIME);
+  skater.swing = Math.max(0, skater.swing - dt / SWING_TIME);
 
   if (state === 'menu') {
     updateMenu();
@@ -937,16 +1004,66 @@ function update(dt) {
 
 // ---------- Рисование ----------
 
-function drawPlayer(p) {
+// Угол клюшки: замах при броске (сначала назад-вправо, потом резко вперёд-влево и обратно)
+// и покачивание, пока нападающий ведёт шайбу.
+function stickAngle(p, time) {
+  let angle = 0;
+  if (p.swing > 0) {
+    const t = 1 - p.swing;
+    angle = t < 0.4 ? 0.9 - (1.5 * t) / 0.4 : -0.6 + (0.6 * (t - 0.4)) / 0.6;
+  }
+  if (puck.owner === p && p === skater) angle += Math.sin(time * 14) * 0.18;
+  return angle;
+}
+
+// Клюшка в системе координат игрока: x — вперёд, y — вправо. Крутится вокруг рук.
+function drawStick(p, time) {
+  const isGoalie = p === goalie;
+  const hands = { x: p.r * 0.15, y: p.r * 0.75 };
+  const heel = { x: p.r + (isGoalie ? 6 : 8), y: isGoalie ? 14 : 6 }; // где рукоятка переходит в крюк
+  const bladeLen = isGoalie ? 40 : 30;
+
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  ctx.rotate(Math.atan2(p.fy, p.fx));
+  ctx.translate(hands.x, hands.y);
+  ctx.rotate(stickAngle(p, time));
+  ctx.translate(-hands.x, -hands.y);
+  ctx.lineCap = 'round';
+
+  // Рукоятка: тёмный контур, светлое дерево, чёрная обмотка у рук.
+  drawLine(ctx, hands.x, hands.y, heel.x, heel.y, '#4e342e', 11);
+  drawLine(ctx, hands.x, hands.y, heel.x, heel.y, '#d7a86e', 6);
+  if (isGoalie) {
+    // У вратарской клюшки нижняя часть широкая.
+    const mid = { x: (hands.x + heel.x * 2) / 3, y: (hands.y + heel.y * 2) / 3 };
+    drawLine(ctx, mid.x, mid.y, heel.x, heel.y, '#4e342e', 16);
+    drawLine(ctx, mid.x, mid.y, heel.x, heel.y, '#d7a86e', 11);
+  }
+  drawLine(ctx, hands.x, hands.y, hands.x + (heel.x - hands.x) * 0.15, hands.y + (heel.y - hands.y) * 0.15, '#212121', 8);
+
+  // Крюк: изогнутый, чёрный, с белой полоской ленты.
+  ctx.strokeStyle = '#212121';
+  ctx.lineWidth = isGoalie ? 13 : 10;
+  ctx.beginPath();
+  ctx.moveTo(heel.x - 2, heel.y + 4);
+  ctx.quadraticCurveTo(heel.x + 10, heel.y - bladeLen * 0.5, heel.x + 4, heel.y - bladeLen);
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(heel.x + 3, heel.y - bladeLen * 0.25);
+  ctx.quadraticCurveTo(heel.x + 8, heel.y - bladeLen * 0.5, heel.x + 5, heel.y - bladeLen * 0.75);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawPlayer(p, time) {
   const { x, y, fx, fy, r } = p;
   const px = -fy; // перпендикуляр к направлению взгляда
   const py = fx;
 
-  // Клюшка: от плеча к крюку перед игроком.
-  const bladeX = x + fx * (r + 8);
-  const bladeY = y + fy * (r + 8);
-  drawLine(ctx, x + px * r * 0.7, y + py * r * 0.7, bladeX + px * 6, bladeY + py * 6, '#8d5524', 8);
-  drawLine(ctx, bladeX + px * 16, bladeY + py * 16, bladeX - px * 12, bladeY - py * 12, '#212121', 10);
+  drawStick(p, time);
 
   ctx.fillStyle = p.color;
   ctx.beginPath();
@@ -973,6 +1090,50 @@ function drawPlayer(p) {
     ctx.arc(ex + fx * 2, ey + fy * 2, 2.5, 0, Math.PI * 2);
     ctx.fill();
   }
+  if (p === goalie) drawGoalieMask(hx, hy, r * 0.55, fx, fy);
+  else drawVisor(hx, hy, r * 0.55, fx, fy);
+}
+
+// Вратарский шлем: решётка-маска на лице.
+function drawGoalieMask(hx, hy, hr, fx, fy) {
+  ctx.save();
+  ctx.translate(hx, hy);
+  ctx.rotate(Math.atan2(fy, fx));
+  ctx.beginPath();
+  ctx.arc(0, 0, hr, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.strokeStyle = '#cfd8dc';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  for (const x of [hr * 0.25, hr * 0.55, hr * 0.85]) {
+    ctx.moveTo(x, -hr);
+    ctx.lineTo(x, hr);
+  }
+  for (const y of [-hr * 0.35, hr * 0.35]) {
+    ctx.moveTo(hr * 0.1, y);
+    ctx.lineTo(hr, y);
+  }
+  ctx.stroke();
+  ctx.restore();
+  drawCircle(ctx, hx, hy, hr, '#eceff1', 3);
+}
+
+// Шлем нападающего: прозрачный визор спереди.
+function drawVisor(hx, hy, hr, fx, fy) {
+  const a = Math.atan2(fy, fx);
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = 'rgba(170,215,255,0.6)';
+  ctx.lineWidth = 9;
+  ctx.beginPath();
+  ctx.arc(hx, hy, hr - 4, a - 0.95, a + 0.95);
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(hx, hy, hr - 7, a - 0.6, a - 0.2);
+  ctx.stroke();
+  ctx.restore();
 }
 
 // Жёлтое кольцо — нападающим управляет второй игрок.
@@ -1067,8 +1228,8 @@ function drawBadge(x, y, color, value) {
 
 // Кнопка действия для планшета: ловушка (поймать) или клюшка (бросить).
 function drawActionButton(time) {
-  if (!showActionButton() || state !== 'play') return;
-  const { x, y, r } = ACTION_BUTTON;
+  if (!showTouchControls() || state !== 'play') return;
+  const { x, y, r } = actionButton();
   const holding = puck.owner === goalie;
   const pressed = glove.open > 0;
   const pulse = holding ? 1 + 0.05 * Math.sin(time * 8) : 1;
@@ -1087,29 +1248,42 @@ function drawActionButton(time) {
   ctx.restore();
 }
 
-// Кружок под пальцем, который ведёт вратаря.
-function drawTouchMarker() {
-  if (mode !== 'pvc' || state !== 'play') return;
-  const touch = movingTouch();
-  if (!touch) return;
-  const p = toWorld(touch);
-  drawCircle(ctx, p.x, p.y, 40, 'rgba(255,255,255,0.6)', 5);
+// Экранный джойстик: основание там, где коснулся, и «шляпка» под пальцем.
+// Пока пальца нет — бледная подсказка в левом нижнем углу.
+function drawJoystick() {
+  if (!showTouchControls() || state !== 'play') return;
+  const stick = touchStick();
+  const base = stick ? stick.base : stickHome();
+  const knob = stick ? stick.knob : stickHome();
+  ctx.save();
+  ctx.globalAlpha = stick ? 0.8 : 0.35;
+  ctx.fillStyle = 'rgba(38,56,89,0.5)';
+  ctx.beginPath();
+  ctx.arc(base.x, base.y, STICK_RADIUS + 20, 0, Math.PI * 2);
+  ctx.fill();
+  drawCircle(ctx, base.x, base.y, STICK_RADIUS + 20, '#ffffff', 5);
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(knob.x, knob.y, 42, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
 }
 
 function drawScore() {
   ctx.font = 'bold 48px sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  drawBadge(RINK.cx - 70, 48, goalie.color, score.mine);
-  drawBadge(RINK.cx + 70, 48, skater.color, score.goals);
+  const y = view.screen.top + 48;
+  drawBadge(RINK.cx - 70, y, goalie.color, score.mine);
+  drawBadge(RINK.cx + 70, y, skater.color, score.goals);
   ctx.fillStyle = '#ffffff';
-  ctx.fillText(':', RINK.cx, 44);
+  ctx.fillText(':', RINK.cx, y - 4);
 
   // Звёзды за пойманные броски — отдельно, слева.
-  drawStar(RINK.cx - 330, 48, 32, '#ffd600');
+  drawStar(RINK.cx - 330, y, 32, '#ffd600');
   ctx.fillStyle = '#ffd600';
   ctx.textAlign = 'left';
-  ctx.fillText(String(score.saves), RINK.cx - 285, 50);
+  ctx.fillText(String(score.saves), RINK.cx - 285, y + 2);
 }
 
 // Номер версии мелко в правом верхнем углу — чтобы видеть, обновилась ли игра на iPad.
@@ -1118,11 +1292,11 @@ function drawVersion() {
   ctx.font = '20px sans-serif';
   ctx.textAlign = 'right';
   ctx.textBaseline = 'top';
-  ctx.fillText(VERSION, WORLD.w - 12, 8);
+  ctx.fillText(VERSION, view.screen.right - 12, view.screen.top + 8);
 }
 
 function drawMenuButton() {
-  const { x, y, r } = MENU_BUTTON;
+  const { x, y, r } = menuButton();
   ctx.fillStyle = 'rgba(255,255,255,0.2)';
   ctx.beginPath();
   ctx.arc(x, y, r, 0, Math.PI * 2);
@@ -1214,7 +1388,37 @@ function drawMenuIcon(icon, x, y) {
 
 function drawOverlay() {
   ctx.fillStyle = 'rgba(0,0,0,0.45)';
-  ctx.fillRect(0, 0, WORLD.w, WORLD.h);
+  const s = view.screen;
+  ctx.fillRect(s.left, s.top, s.right - s.left, s.bottom - s.top);
+}
+
+// Ряд сложности: три кнопки, выбранная — яркая с жёлтой рамкой, остальные приглушены.
+function drawDifficultyRow(row, focused, time) {
+  DIFFICULTIES.forEach((d, i) => {
+    const r = difficultyRect(row, i);
+    const chosen = i === difficultyIndex;
+    const grow = chosen && focused ? 1 + 0.04 * Math.sin(time * 6) : 1;
+    ctx.save();
+    ctx.globalAlpha = chosen ? 1 : 0.55;
+    ctx.translate(r.x + r.w / 2, r.y + r.h / 2);
+    ctx.scale(grow, grow);
+    ctx.fillStyle = d.color;
+    ctx.beginPath();
+    ctx.roundRect(-r.w / 2, -r.h / 2, r.w, r.h, 32);
+    ctx.fill();
+    ctx.strokeStyle = chosen ? '#ffd600' : '#ffffff';
+    ctx.lineWidth = chosen ? 12 : 4;
+    ctx.stroke();
+    for (let s = 0; s < 3; s++) {
+      drawStar(-34 + s * 34, -26, 15, s < d.stars ? '#ffd600' : 'rgba(255,255,255,0.3)');
+    }
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 40px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(d.label, 0, 28);
+    ctx.restore();
+  });
 }
 
 function drawMenu(time) {
@@ -1222,6 +1426,10 @@ function drawMenu(time) {
   menuItems().forEach((item, i) => {
     const r = menuItemRect(i);
     const selected = i === menuIndex;
+    if (item === DIFFICULTY_ITEM) {
+      drawDifficultyRow(r, selected, time);
+      return;
+    }
     const grow = selected ? 1 + 0.04 * Math.sin(time * 6) : 1;
     ctx.save();
     ctx.translate(r.x + r.w / 2, r.y + r.h / 2);
@@ -1258,15 +1466,15 @@ function draw(time) {
 
   drawRink(ctx);
   drawHumanRing();
-  drawPlayer(skater);
-  drawPlayer(goalie);
+  drawPlayer(skater, time);
+  drawPlayer(goalie, time);
   drawGlove();
   drawRadar();
   drawPuck();
   drawScore();
   drawMenuButton();
   drawVersion();
-  drawTouchMarker();
+  drawJoystick();
   drawActionButton(time);
   drawSaveFlash();
   Effects.draw(ctx);
