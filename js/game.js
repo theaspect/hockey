@@ -76,12 +76,14 @@ const PATROL_X = RINK.cx - 150; // где нападающий караулит 
 const PATROL_AMP = 260;
 const PATROL_FREQ = 0.9;
 const PAD_ACTIONS = ['PadA', 'PadB', 'PadX', 'PadY', 'PadRT', 'PadRB'];
-// Кнопка меню, кнопка действия и джойстик привязаны к краям экрана — см. menuButton() / actionButton() / stickHome().
-const VERSION = 'v11'; // показывается в углу экрана; поднимать при каждой выкладке
+// Кнопка меню, кнопки действия и джойстики привязаны к краям экрана — см. menuButton() / actionButtonOf() / stickHomeOf().
+const VERSION = 'v12'; // показывается в углу экрана; поднимать при каждой выкладке
 const SLOW_PUCK = 300; // медленную шайбу вратарь берёт просто касанием, без кнопки
 const STICK_RADIUS = 80; // насколько отводить палец экранного джойстика для полной скорости
 const TOUCH_STICK_DEADZONE = 0.15;
 const SWING_TIME = 0.35; // длительность замаха клюшкой при броске
+const STEAL_LEVEL = 12; // с какого уровня компьютер отбирает шайбу у вратаря, выехавшего из своей зоны
+const MAX_LEVEL = 30; // примерно здесь сложность перестаёт расти — конец шкалы уровня
 
 // Игра всегда альбомная, и поворот iPad на неё не влияет (страница не может запретить поворот экрана).
 // Если система повернула экран в портрет, мы поворачиваем картинку обратно — в ту сторону, чтобы игра
@@ -138,15 +140,6 @@ function menuButton() {
   return { x: view.screen.left + 50, y: view.screen.top + 48, r: 32 };
 }
 
-// Кнопка «поймать/бросить» на планшете — в правом нижнем углу экрана.
-function actionButton() {
-  return { x: view.screen.right - 130, y: view.screen.bottom - 130, r: 90 };
-}
-
-// Где рисуется подсказка джойстика, пока пальца нет, — левый нижний угол экрана.
-function stickHome() {
-  return { x: view.screen.left + 150, y: view.screen.bottom - 150 };
-}
 window.addEventListener('resize', resize);
 window.addEventListener('orientationchange', () => setTimeout(resize, 200));
 if (window.visualViewport) window.visualViewport.addEventListener('resize', resize);
@@ -159,9 +152,26 @@ function toLandscape(p) {
   return { x: view.h - p.y, y: p.x };
 }
 
-function toWorld(p) {
+// Координаты «экрана» (табло, меню, кнопки, джойстики — они никогда не разворачиваются).
+function toHud(p) {
   const l = toLandscape(p);
   return { x: (l.x - view.ox) / view.scale, y: (l.y - view.oy) / view.scale };
+}
+
+// «2 игрока на одном планшете»: площадка разворачивается на 180°, чтобы ворота вратаря
+// были у того игрока, который сейчас вратарь. Разворот — вокруг центра площадки.
+function flipped() {
+  return tabletDuel() && goalieOwner === 1;
+}
+
+function flipPoint(p) {
+  if (!flipped()) return p;
+  return { x: 2 * RINK.cx - p.x, y: 2 * RINK.cy - p.y };
+}
+
+// Координаты площадки (с учётом разворота).
+function toWorld(p) {
+  return flipPoint(toHud(p));
 }
 
 function rand(min, max) {
@@ -340,34 +350,78 @@ function skaterIsHuman() {
   return mode === 'pvp';
 }
 
-// Планшет (режим 1 игрок), управление двумя большими пальцами:
+// ---------- Сенсорное управление ----------
+// «1 игрок» на планшете, двумя большими пальцами:
 //   левая половина экрана — джойстик: где коснулся, там его основание, отклонение пальца = направление и скорость;
-//   правая половина — действие (кнопка 🧤/🏒 справа внизу — просто подсказка, нажимать можно где угодно справа).
-// Поворачивать вратаря не нужно: он сам смотрит на шайбу, а бросок идёт по прицелу.
-// Мышь: вратарь едет за курсором, клик — действие.
+//   правая половина — действие (кнопка 🧤/🏒 справа внизу — подсказка, нажимать можно где угодно справа).
+// «2 игрока» на одном планшете (лежит на столе, игроки у узких краёв, каждый за своими воротами):
+//   у каждого своя половина экрана (игрок 0 — левая, игрок 1 — правая);
+//   в своей половине: кнопка действия в углу под правую руку, всё остальное — джойстик.
+// Поворачивать игрока не нужно: вратарь сам смотрит на шайбу, бросок вратаря идёт по прицелу,
+// нападающий бросает туда, куда едет.
+// Мышь («1 игрок»): вратарь едет за курсором, клик — действие.
+function tabletDuel() {
+  return mode === 'pvp' && Input.lastDevice === 'touch';
+}
+
 function showTouchControls() {
-  return mode === 'pvc' && Input.lastDevice === 'touch';
+  return Input.lastDevice === 'touch' && (mode === 'pvc' || tabletDuel());
+}
+
+function touchPlayers() {
+  return mode === 'pvc' ? [0] : [0, 1];
+}
+
+// Чья половина экрана (в «1 игрок» — левая половина для джойстика).
+function sideOf(hudPoint) {
+  return hudPoint.x < RINK.cx ? 0 : 1;
 }
 
 function onLeftHalf(screenPoint) {
-  return toWorld(screenPoint).x < WORLD.w / 2;
+  return sideOf(toHud(screenPoint)) === 0;
 }
 
-// Палец джойстика: первый, что опустили на левую половину экрана.
-function stickTouch() {
+// Кнопка действия игрока; rot — как повернуть значок, чтобы он смотрел на игрока.
+function actionButtonOf(player) {
+  const s = view.screen;
+  if (mode === 'pvc') return { x: s.right - 130, y: s.bottom - 130, r: 90, rot: 0 };
+  if (player === 0) return { x: s.left + 110, y: s.bottom - 110, r: 80, rot: Math.PI / 2 };
+  return { x: s.right - 110, y: s.top + 130, r: 80, rot: -Math.PI / 2 };
+}
+
+// Где рисуется подсказка джойстика, пока пальца нет (под левую руку игрока).
+function stickHomeOf(player) {
+  const s = view.screen;
+  if (mode === 'pvc') return { x: s.left + 150, y: s.bottom - 150 };
+  if (player === 0) return { x: s.left + 170, y: s.top + 260 };
+  return { x: s.right - 170, y: s.bottom - 260 };
+}
+
+function onActionButtonOf(player, screenPoint) {
+  const p = toHud(screenPoint);
+  const b = actionButtonOf(player);
+  return Math.hypot(p.x - b.x, p.y - b.y) < b.r + 20;
+}
+
+// Палец джойстика игрока: первый, что опустили в его зону (и не на его кнопку действия).
+function stickTouchOf(player) {
   for (const p of Input.pointers.values()) {
-    if (p.type === 'touch' && onLeftHalf({ x: p.startX, y: p.startY })) return p;
+    if (p.type !== 'touch') continue;
+    const start = { x: p.startX, y: p.startY };
+    if (sideOf(toHud(start)) !== player) continue;
+    if (mode === 'pvp' && onActionButtonOf(player, start)) continue;
+    return p;
   }
   return null;
 }
 
-// Джойстик: { base, knob, dir } в координатах игры или null, если пальца нет.
-function touchStick() {
-  if (mode !== 'pvc') return null;
-  const touch = stickTouch();
+// Джойстик игрока: { base, knob } — в координатах экрана (для рисования), dir — направление на площадке.
+function touchStickOf(player) {
+  if (!showTouchControls()) return null;
+  const touch = stickTouchOf(player);
   if (!touch) return null;
-  const base = toWorld({ x: touch.startX, y: touch.startY });
-  const finger = toWorld(touch);
+  const base = toHud({ x: touch.startX, y: touch.startY });
+  const finger = toHud(touch);
   let dx = (finger.x - base.x) / STICK_RADIUS;
   let dy = (finger.y - base.y) / STICK_RADIUS;
   const len = Math.hypot(dx, dy);
@@ -376,8 +430,25 @@ function touchStick() {
     dy /= len;
   }
   const knob = { x: base.x + dx * STICK_RADIUS, y: base.y + dy * STICK_RADIUS };
-  const dir = len < TOUCH_STICK_DEADZONE ? { x: 0, y: 0 } : { x: dx, y: dy };
+  const sign = flipped() ? -1 : 1; // площадка развёрнута — направления тоже
+  const dir = len < TOUCH_STICK_DEADZONE ? { x: 0, y: 0 } : { x: dx * sign, y: dy * sign };
   return { base, knob, dir };
+}
+
+// Нажал ли игрок действие пальцем в этом кадре.
+function touchActionOf(player) {
+  if (mode === 'pvc') return Input.taps.some((t) => t.type === 'touch' && !onLeftHalf(t));
+  return Input.taps.some((t) => t.type === 'touch' && onActionButtonOf(player, t));
+}
+
+function touchControls(player) {
+  const act = () => touchActionOf(player);
+  return {
+    dir: () => (touchStickOf(player) || { dir: { x: 0, y: 0 } }).dir,
+    action: act,
+    shot: act,
+    usesPointer: false,
+  };
 }
 
 // ---------- Режим «2 игрока»: у каждого игрока своё управление ----------
@@ -403,6 +474,7 @@ function keyboardControls(dir, keys, usesPointer) {
 }
 
 function controlsOf(player) {
+  if (tabletDuel()) return touchControls(player);
   const pads = Input.pads.length;
   if (pads >= 2) return padControls(player);
   if (pads === 1) {
@@ -422,15 +494,15 @@ function skaterControls() {
 }
 
 function goalieDirection() {
-  const stick = touchStick();
+  if (mode === 'pvp') return goalieControls().dir();
+  const stick = touchStickOf(0);
   if (stick) return stick.dir;
-  if (mode === 'pvc') return Input.direction();
-  return goalieControls().dir();
+  return Input.direction();
 }
 
 function goalieMoveTarget() {
   if (mode === 'pvp') return goalieControls().usesPointer && Input.pointer.down ? toWorld(Input.pointer) : null;
-  if (stickTouch()) return null;
+  if (stickTouchOf(0)) return null;
   if (Input.lastDevice === 'mouse') return toWorld(Input.mouse);
   return null;
 }
@@ -440,7 +512,7 @@ function goalieAction() {
   if (mode === 'pvp') return goalieControls().action();
   if (Input.wasPressed(...PAD_ACTIONS)) return true;
   if (Input.wasPressed('Space', 'Enter')) return true;
-  return Input.taps.some((t) => t.type === 'mouse' || !onLeftHalf(t));
+  return Input.taps.some((t) => t.type === 'mouse') || touchActionOf(0);
 }
 
 function skaterDirection() {
@@ -597,6 +669,11 @@ function shootByRadar() {
 
 function updateAiSkater(dt) {
   const speed = skaterSpeed();
+  if (puck.owner === goalie && canStealFromGoalie()) {
+    // Вратарь выехал с шайбой из своей зоны — на высоком уровне компьютер едет отбирать.
+    moveToward(skater, puck.x, puck.y, speed, dt);
+    return;
+  }
   if (puck.owner === goalie) {
     // Караулит, гуляя вверх-вниз посреди площадки: вратарю надо выбрать момент, когда путь свободен.
     patrolPhase += PATROL_FREQ * dt;
@@ -821,8 +898,26 @@ function goalieBlock() {
   Sound.tone(160, 0.06, 'triangle', 0, 0.2);
 }
 
+// Как в настоящем хоккее: в своей синей зоне вратарь неприкосновенен,
+// а выехал с шайбой за её пределы — шайбу можно отобрать.
+// Компьютер так делает только на высоком уровне, второй игрок — всегда.
+function goalieOutOfCrease() {
+  return Math.hypot(goalie.x - RINK.leftGoalX, goalie.y - RINK.cy) > RINK.creaseR;
+}
+
+function canStealFromGoalie() {
+  if (!goalieOutOfCrease()) return false;
+  return mode === 'pvp' || level() >= STEAL_LEVEL;
+}
+
 function skaterPickup() {
-  if (puck.owner || skater.cooldown > 0 || !touchesPuck(skater)) return;
+  if (skater.cooldown > 0 || !touchesPuck(skater)) return;
+  const steal = puck.owner === goalie && canStealFromGoalie();
+  if (puck.owner && !steal) return;
+  if (steal) {
+    goalie.cooldown = 0.8;
+    Sound.tone(300, 0.08, 'sawtooth', 0, 0.15);
+  }
   puck.owner = skater;
   puck.shot = false;
   skaterHeld = 0;
@@ -968,7 +1063,7 @@ function pointInRect(p, r) {
 
 function menuButtonClicked() {
   if (!Input.pointer.pressed) return false;
-  const p = toWorld(Input.pointer);
+  const p = toHud(Input.pointer);
   return Math.hypot(p.x - menuButton().x, p.y - menuButton().y) < menuButton().r + 10;
 }
 
@@ -1007,7 +1102,7 @@ function updateMenu() {
   }
   if (Input.wasPressed('Enter', 'Space', 'PadA')) return chooseMenuItem(menuIndex);
   if (!Input.pointer.pressed) return;
-  const p = toWorld(Input.pointer);
+  const p = toHud(Input.pointer);
   const hit = items.findIndex((_, i) => pointInRect(p, menuItemRect(i)));
   if (hit < 0) return;
   if (items[hit] !== DIFFICULTY_ITEM) return chooseMenuItem(hit);
@@ -1199,11 +1294,6 @@ function drawVisor(hx, hy, hr, fx, fy) {
   ctx.restore();
 }
 
-// Жёлтое кольцо — нападающим управляет второй игрок.
-function drawHumanRing() {
-  if (!skaterIsHuman()) return;
-  drawCircle(ctx, skater.x, skater.y, SKATER_R + 10, '#ffd600', 6);
-}
 
 // У вратаря большая ловушка (перчатка) сбоку. Раскрытая — больше, и видно, докуда она достаёт.
 function drawGlove() {
@@ -1289,47 +1379,66 @@ function drawBadge(x, y, color, value) {
   ctx.fillText(String(value), x, y + 3);
 }
 
-// Кнопка действия для планшета: ловушка (поймать) или клюшка (бросить).
-function drawActionButton(time) {
-  if (!showTouchControls() || state !== 'play') return;
-  const { x, y, r } = actionButton();
-  const holding = puck.owner === goalie;
-  const pressed = glove.open > 0;
-  const pulse = holding ? 1 + 0.05 * Math.sin(time * 8) : 1;
-  ctx.save();
-  ctx.globalAlpha = 0.85;
-  ctx.fillStyle = holding ? '#43a047' : pressed ? '#ffd600' : '#ffb300';
-  ctx.beginPath();
-  ctx.arc(x, y, r * pulse, 0, Math.PI * 2);
-  ctx.fill();
-  drawCircle(ctx, x, y, r * pulse, '#ffffff', 6);
-  ctx.globalAlpha = 1;
-  ctx.font = `${Math.round(r * 0.9)}px sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(holding ? '🏒' : '🧤', x, y + 4);
-  ctx.restore();
+// Кем сейчас играет игрок (для «2 игрока»): вратарь или нападающий.
+function roleOf(player) {
+  if (mode === 'pvc') return goalie;
+  return player === goalieOwner ? goalie : skater;
 }
 
-// Экранный джойстик: основание там, где коснулся, и «шляпка» под пальцем.
-// Пока пальца нет — бледная подсказка в левом нижнем углу.
-function drawJoystick() {
+// Кнопки действия для планшета: у вратаря ловушка (поймать) или клюшка (бросить), у нападающего — клюшка.
+// Значок повёрнут к своему игроку. Цвет рамки — цвет игрока.
+function drawActionButtons(time) {
   if (!showTouchControls() || state !== 'play') return;
-  const stick = touchStick();
-  const base = stick ? stick.base : stickHome();
-  const knob = stick ? stick.knob : stickHome();
-  ctx.save();
-  ctx.globalAlpha = stick ? 0.8 : 0.35;
-  ctx.fillStyle = 'rgba(38,56,89,0.5)';
-  ctx.beginPath();
-  ctx.arc(base.x, base.y, STICK_RADIUS + 20, 0, Math.PI * 2);
-  ctx.fill();
-  drawCircle(ctx, base.x, base.y, STICK_RADIUS + 20, '#ffffff', 5);
-  ctx.fillStyle = '#ffffff';
-  ctx.beginPath();
-  ctx.arc(knob.x, knob.y, 42, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
+  for (const player of touchPlayers()) {
+    const { x, y, r, rot } = actionButtonOf(player);
+    const role = roleOf(player);
+    const holding = puck.owner === role;
+    const isGoalie = role === goalie;
+    const pulse = holding ? 1 + 0.05 * Math.sin(time * 8) : 1;
+    let fill = '#ffb300';
+    if (holding) fill = '#43a047';
+    else if (isGoalie && glove.open > 0) fill = '#ffd600';
+    else if (!isGoalie) fill = '#90a4ae'; // нападающему без шайбы бросать нечего
+    ctx.save();
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = fill;
+    ctx.beginPath();
+    ctx.arc(x, y, r * pulse, 0, Math.PI * 2);
+    ctx.fill();
+    drawCircle(ctx, x, y, r * pulse, mode === 'pvp' ? PLAYER_COLORS[player] : '#ffffff', 8);
+    ctx.globalAlpha = 1;
+    ctx.translate(x, y);
+    ctx.rotate(rot);
+    ctx.font = `${Math.round(r * 0.9)}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(isGoalie && !holding ? '🧤' : '🏒', 0, 4);
+    ctx.restore();
+  }
+}
+
+// Экранные джойстики: основание там, где коснулся, и «шляпка» под пальцем.
+// Пока пальца нет — бледная подсказка под левую руку игрока.
+function drawJoysticks() {
+  if (!showTouchControls() || state !== 'play') return;
+  for (const player of touchPlayers()) {
+    const stick = touchStickOf(player);
+    const home = stickHomeOf(player);
+    const base = stick ? stick.base : home;
+    const knob = stick ? stick.knob : home;
+    ctx.save();
+    ctx.globalAlpha = stick ? 0.8 : 0.35;
+    ctx.fillStyle = 'rgba(38,56,89,0.5)';
+    ctx.beginPath();
+    ctx.arc(base.x, base.y, STICK_RADIUS + 20, 0, Math.PI * 2);
+    ctx.fill();
+    drawCircle(ctx, base.x, base.y, STICK_RADIUS + 20, mode === 'pvp' ? PLAYER_COLORS[player] : '#ffffff', 5);
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(knob.x, knob.y, 42, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
 }
 
 function drawScore() {
@@ -1355,6 +1464,30 @@ function drawScore() {
   ctx.fillStyle = '#ffd600';
   ctx.textAlign = 'left';
   ctx.fillText(String(score.saves), RINK.cx - 285, y + 2);
+  drawLevelBar(RINK.cx + 170, y);
+}
+
+// Шкала уровня: 10 делений от зелёного к красному — насколько сейчас сильный соперник.
+// Растёт с каждой звездой (на «Трудно» начинается не с нуля).
+function drawLevelBar(x, y) {
+  const segments = 10;
+  const w = 26;
+  const gap = 5;
+  const h = 34;
+  const filled = Math.min(segments, Math.ceil((level() / MAX_LEVEL) * segments));
+  ctx.font = '36px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('⚡', x, y + 2);
+  for (let i = 0; i < segments; i++) {
+    const hue = 120 - (120 * i) / (segments - 1); // зелёный → жёлтый → красный
+    const sx = x + 50 + i * (w + gap);
+    const sh = h * (0.55 + (0.45 * i) / (segments - 1)); // деления растут, как лесенка
+    ctx.fillStyle = i < filled ? `hsl(${hue}, 85%, 52%)` : 'rgba(255,255,255,0.15)';
+    ctx.beginPath();
+    ctx.roundRect(sx, y + h / 2 - sh, w, sh, 5);
+    ctx.fill();
+  }
 }
 
 // Номер версии мелко в правом верхнем углу — чтобы видеть, обновилась ли игра на iPad.
@@ -1563,20 +1696,29 @@ function draw(time) {
   else ctx.setTransform(0, -d, d, 0, 0, view.h * d); // на 90° против часовой
   ctx.transform(view.scale, 0, 0, view.scale, view.ox, view.oy);
 
+  // Площадка — может быть развёрнута на 180° («2 игрока» на одном планшете).
+  ctx.save();
+  if (flipped()) {
+    ctx.translate(RINK.cx, RINK.cy);
+    ctx.rotate(Math.PI);
+    ctx.translate(-RINK.cx, -RINK.cy);
+  }
   drawRink(ctx);
-  drawHumanRing();
   drawPlayer(skater, time);
   drawPlayer(goalie, time);
   drawGlove();
   drawRadar();
   drawPuck();
+  drawSaveFlash();
+  Effects.draw(ctx);
+  ctx.restore();
+
+  // Табло, кнопки, джойстики — всегда на своих местах на экране.
   drawScore();
   drawMenuButton();
   drawVersion();
-  drawJoystick();
-  drawActionButton(time);
-  drawSaveFlash();
-  Effects.draw(ctx);
+  drawJoysticks();
+  drawActionButtons(time);
   if (state === 'goal' && goalInfo.mine) drawGoalText(time);
   if (state === 'goal' && goalInfo.pvpScorer !== undefined) drawSwapText(time, goalInfo.pvpScorer);
   if (state === 'menu') drawMenu(time);
