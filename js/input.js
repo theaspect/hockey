@@ -14,7 +14,16 @@ const Input = {
   pressed: new Set(),
   padHeld: new Set(),
   stick: { x: 0, y: 0 },
+  // «Главный» указатель — последний нажатый палец/мышь.
   pointer: { x: 0, y: 0, down: false, pressed: false, released: false },
+  // Все пальцы, которые сейчас на экране (мультитач): id -> { x, y, type }.
+  pointers: new Map(),
+  // Нажатия за этот кадр: [{ id, x, y, type }].
+  taps: [],
+  // Где мышь (даже без нажатия) — чтобы вратарь мог ездить за курсором.
+  mouse: { x: 0, y: 0 },
+  // Чем пользовались последним: 'key' | 'pad' | 'mouse' | 'touch'.
+  lastDevice: 'key',
 
   isDown(...codes) {
     return codes.some((code) => this.keys.has(code) || this.padHeld.has(code));
@@ -85,6 +94,7 @@ const Input = {
     for (const code of held) {
       if (!this.padHeld.has(code)) this.pressed.add(code);
     }
+    if (held.size > 0 || this.stick.x || this.stick.y) this.lastDevice = 'pad';
     this.padHeld = held;
   },
 
@@ -97,28 +107,50 @@ const Input = {
 
   endFrame() {
     this.pressed.clear();
+    this.taps = [];
     this.pointer.pressed = false;
     this.pointer.released = false;
   },
 };
 
+function deviceOf(e) {
+  return e.pointerType === 'mouse' ? 'mouse' : 'touch';
+}
+
 window.addEventListener('keydown', (e) => {
   if (!e.repeat) Input.pressed.add(e.code);
   Input.keys.add(e.code);
+  Input.lastDevice = 'key';
   if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
 });
 window.addEventListener('keyup', (e) => Input.keys.delete(e.code));
-window.addEventListener('blur', () => Input.keys.clear());
+window.addEventListener('blur', () => {
+  Input.keys.clear();
+  Input.pointers.clear();
+});
 
 window.addEventListener('pointerdown', (e) => {
+  const type = deviceOf(e);
+  Input.lastDevice = type;
+  Input.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, type, startX: e.clientX, startY: e.clientY });
+  Input.taps.push({ id: e.pointerId, x: e.clientX, y: e.clientY, type });
   Object.assign(Input.pointer, { x: e.clientX, y: e.clientY, down: true, pressed: true });
 });
 window.addEventListener('pointermove', (e) => {
+  const p = Input.pointers.get(e.pointerId);
+  if (p) Object.assign(p, { x: e.clientX, y: e.clientY });
+  if (e.pointerType === 'mouse') {
+    Object.assign(Input.mouse, { x: e.clientX, y: e.clientY });
+    Input.lastDevice = 'mouse';
+  }
   Input.pointer.x = e.clientX;
   Input.pointer.y = e.clientY;
 });
-window.addEventListener('pointerup', () => {
+function pointerEnd(e) {
+  Input.pointers.delete(e.pointerId);
   Input.pointer.down = false;
   Input.pointer.released = !Input.pointer.swallowed;
   Input.pointer.swallowed = false;
-});
+}
+window.addEventListener('pointerup', pointerEnd);
+window.addEventListener('pointercancel', pointerEnd);

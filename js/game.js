@@ -11,7 +11,9 @@
 //         с геймпадом: вратарь — геймпад; нападающий — клавиатура (стрелки/WASD + пробел/Enter) или мышь;
 //         без геймпада: вратарь — WASD + пробел; нападающий — стрелки + Enter или мышь.
 //   Мышь у нападающего: держать кнопку — ехать к курсору, отпустить — бросок.
-//   Мышь у вратаря (pvc): держать кнопку — ехать к курсору, каждое нажатие — действие.
+//   Мышь у вратаря (pvc): вратарь едет за курсором, клик — действие.
+//   Планшет (pvc): палец где угодно — вратарь едет к пальцу; кнопка 🧤/🏒 справа внизу — действие.
+// Медленную шайбу вратарь берёт простым касанием (без звезды), быструю — только ловушкой.
 // Меню: кнопка ☰ слева сверху, Esc или Start на геймпаде.
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
@@ -28,7 +30,7 @@ const MIN_HOLD = 0.3; // сразу после поимки бросить не�
 const GLOVE_COOLDOWN = 0.45; // пауза после попытки, чтобы не ловить «долбёжкой» по кнопке
 const RADAR_AMP = (60 * Math.PI) / 180; // прицел качается на ±60° вокруг ворот — хватает на броски через борт
 const RADAR_BOUNCES = 2; // сколько отскоков от бортов показывает прицел
-const BOARD_BOUNCE_KEEP = 0.9; // сколько скорости шайба сохраняет после удара о борт
+const BOARD_BOUNCE_KEEP = 0.85; // сколько скорости шайба сохраняет после удара о борт
 
 // Уровни сложности (выбираются в меню).
 //   startLevel — с какого уровня начинается игра, growth — сколько уровня даёт одна звезда,
@@ -67,13 +69,16 @@ function difficulty() {
 function catchReach() {
   return GOALIE_R + PUCK_R + difficulty().reach;
 }
-const PUCK_FRICTION = 0.7; // какая доля скорости шайбы остаётся через секунду
+const PUCK_FRICTION = 0.6; // какая доля скорости шайбы остаётся через секунду
+const SLOW_FRICTION = 0.3; // медленная шайба тормозит сильнее и быстро останавливается — её легко подобрать
 const FAST_PUCK = 700; // быструю шайбу нападающему поймать труднее — нужно встать точно на пути
 const PATROL_X = RINK.cx - 150; // где нападающий караулит бросок вратаря
 const PATROL_AMP = 260;
 const PATROL_FREQ = 0.9;
 const PAD_ACTIONS = ['PadA', 'PadB', 'PadX', 'PadY', 'PadRT', 'PadRB'];
 const MENU_BUTTON = { x: 50, y: 48, r: 32 };
+const ACTION_BUTTON = { x: WORLD.w - 130, y: WORLD.h - 130, r: 90 }; // кнопка «поймать/бросить» на планшете
+const SLOW_PUCK = 300; // медленную шайбу вратарь берёт просто касанием, без кнопки
 
 function resize() {
   view.dpr = window.devicePixelRatio || 1;
@@ -113,6 +118,7 @@ let saveFlash = 0;
 let shotSpot = null;
 let patrolPhase = 0;
 let skaterReaction = 0; // сколько ещё нападающий «соображает» после броска вратаря
+let skaterHeld = 0; // сколько нападающий уже держит шайбу — бросать сразу нельзя
 
 // ---------- Сложность: всё зависит от количества очков ----------
 
@@ -142,9 +148,15 @@ function goalieSpeed() {
   return Math.max(480 - level() * 6, 320);
 }
 
-// 0 — бросок прямо во вратаря, 1 — в самую штангу.
-function aimSpread() {
-  return Math.min(0.15 + level() * 0.06, 1);
+// Насколько компьютер ошибается, выбирая, куда бросить мимо вратаря (в пикселях «оценки»).
+// Не опускается до нуля — компьютер никогда не играет идеально.
+function aimNoise() {
+  return Math.max(220 - level() * 10, 40);
+}
+
+// Сколько нападающий держит шайбу, прежде чем может бросить.
+function minSkaterHold() {
+  return Math.max(1.2 - level() * 0.03, 0.5);
 }
 
 // Скорость качания прицела, радиан в секунду.
@@ -184,6 +196,7 @@ function faceoff() {
   Object.assign(goalie, { x: RINK.left + 90, y: RINK.cy, fx: 1, fy: 0, cooldown: 0 });
   Object.assign(skater, { x: RINK.cx, y: RINK.cy, fx: -1, fy: 0, cooldown: 0 });
   Object.assign(puck, holdPoint(skater), { vx: 0, vy: 0, owner: skater, shot: false });
+  skaterHeld = 0;
   pickShotSpot();
 }
 
@@ -213,14 +226,40 @@ function goalieDirection() {
   return Input.wasdDirection();
 }
 
-function goalieUsesPointer() {
-  return mode === 'pvc' && Input.pointer.down;
+// На планшете (режим 1 игрок): палец в любом месте — вратарь едет к пальцу,
+// большая кнопка в правом нижнем углу — действие. Мышь: вратарь едет за курсором, клик — действие.
+function showActionButton() {
+  return mode === 'pvc' && Input.lastDevice === 'touch';
+}
+
+function onActionButton(screenPoint) {
+  const w = toWorld(screenPoint);
+  return Math.hypot(w.x - ACTION_BUTTON.x, w.y - ACTION_BUTTON.y) < ACTION_BUTTON.r + 20;
+}
+
+// Палец, который двигает вратаря: первый, что опустили не на кнопку действия.
+function movingTouch() {
+  for (const p of Input.pointers.values()) {
+    if (p.type === 'touch' && !onActionButton({ x: p.startX, y: p.startY })) return p;
+  }
+  return null;
+}
+
+function goalieMoveTarget() {
+  if (mode !== 'pvc') return null;
+  const touch = movingTouch();
+  if (touch) return toWorld(touch);
+  if (Input.lastDevice === 'mouse') return toWorld(Input.mouse);
+  return null;
 }
 
 // Одна кнопка действия: без шайбы — ловить, с шайбой — бросать.
 function goalieAction() {
   if (Input.wasPressed(...PAD_ACTIONS)) return true;
-  if (mode === 'pvc') return Input.wasPressed('Space', 'Enter') || Input.pointer.pressed;
+  if (mode === 'pvc') {
+    if (Input.wasPressed('Space', 'Enter')) return true;
+    return Input.taps.some((t) => t.type === 'mouse' || onActionButton(t));
+  }
   return !Input.padConnected && Input.wasPressed('Space');
 }
 
@@ -262,9 +301,9 @@ function lookAt(p, x, y) {
 }
 
 function updateGoalie(dt) {
-  if (goalieUsesPointer()) {
-    const t = toWorld(Input.pointer);
-    moveToward(goalie, t.x, t.y, goalieSpeed(), dt);
+  const target = goalieMoveTarget();
+  if (target) {
+    moveToward(goalie, target.x, target.y, goalieSpeed(), dt);
   } else {
     moveByDirection(goalie, goalieDirection(), goalieSpeed(), dt);
   }
@@ -371,6 +410,8 @@ function updateAiSkater(dt) {
   }
   moveToward(skater, shotSpot.x, shotSpot.y, speed, dt);
   shotSpot.timer -= dt;
+  skaterHeld += dt;
+  if (skaterHeld < minSkaterHold()) return; // пауза: вратарь успевает приготовиться
   const arrived = Math.hypot(shotSpot.x - skater.x, shotSpot.y - skater.y) < 20;
   if (!arrived && shotSpot.timer > 0) return;
   if (!shotSpot.faked && Math.random() < fakeChance()) {
@@ -430,16 +471,54 @@ function skaterShot(tx, ty) {
   skater.cooldown = 0.6;
 }
 
-function aiShoot() {
-  const side = Math.random() < 0.5 ? -1 : 1;
-  const ty = RINK.cy + side * rand(0.5, 1) * aimSpread() * (RINK.goalHalf - 18);
-  if (Math.random() < bankChance()) {
-    // Через тот борт, что дальше от вратаря, — так вратарю труднее успеть.
-    const wall = goalie.y > RINK.cy ? -1 : 1;
-    const bank = bankTarget(puck.x, puck.y, RINK.left, ty, wall, PUCK_R);
-    if (bank) return skaterShot(bank.x, bank.y);
+function distToSegment(px, py, a, b) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const t = Math.max(0, Math.min(1, ((px - a.x) * dx + (py - a.y) * dy) / (dx * dx + dy * dy || 1)));
+  return Math.hypot(px - (a.x + t * dx), py - (a.y + t * dy));
+}
+
+// Насколько путь шайбы проходит мимо ловушки вратаря (меньше нуля — прямо в руки).
+function clearance(points) {
+  let min = Infinity;
+  for (let i = 1; i < points.length; i++) {
+    min = Math.min(min, distToSegment(goalie.x, goalie.y, points[i - 1], points[i]));
   }
-  skaterShot(RINK.left - 30, ty);
+  return min - catchReach();
+}
+
+// Варианты броска: в разные точки створа напрямую, а на высоких уровнях — ещё и через борт.
+function aiShotOptions() {
+  const from = { x: puck.x, y: puck.y };
+  const inner = RINK.goalHalf - PUCK_R - 12;
+  const allowBank = Math.random() < bankChance();
+  const options = [];
+  for (let i = -2; i <= 2; i++) {
+    const ty = RINK.cy + (inner * i) / 2;
+    const goalPoint = { x: RINK.left, y: ty };
+    options.push({ aim: { x: RINK.left - 30, y: ty }, points: [from, goalPoint] });
+    if (!allowBank) continue;
+    for (const wall of [-1, 1]) {
+      const bank = bankTarget(from.x, from.y, RINK.left, ty, wall, PUCK_R);
+      if (bank) options.push({ aim: bank, points: [from, bank.bounce, goalPoint] });
+    }
+  }
+  return options;
+}
+
+// Компьютер старается бросить туда, где вратаря нет. Но не идеально: чем ниже уровень, тем больше
+// он ошибается в оценке (шум), и даже на максимуме ошибка не исчезает совсем.
+function aiShoot() {
+  const noise = aimNoise();
+  let best = null;
+  let bestScore = -Infinity;
+  for (const option of aiShotOptions()) {
+    const score = clearance(option.points) + rand(-noise, noise);
+    if (score <= bestScore) continue;
+    best = option;
+    bestScore = score;
+  }
+  skaterShot(best.aim.x, best.aim.y);
 }
 
 // Человек бросает туда, куда смотрит нападающий; если смотрит не в сторону ворот — прямо в ворота.
@@ -479,11 +558,17 @@ function interceptPoint(p, speed) {
   return puckPositionAt(10);
 }
 
-// Ловит только раскрытая ловушка. Можно отобрать шайбу и у нападающего, если он подъехал близко.
+// Быструю шайбу ловит только раскрытая ловушка (по кнопке) — за это звезда.
+// Медленную свободную шайбу вратарь берёт просто касанием, без звезды.
+// Раскрытой ловушкой можно отобрать шайбу и у нападающего, если он подъехал близко.
 function goalieCatch() {
-  if (puck.owner === goalie || goalie.cooldown > 0 || glove.open <= 0) return;
-  if (Math.hypot(puck.x - goalie.x, puck.y - goalie.y) > catchReach()) return;
-  const wasShot = puck.shot;
+  if (puck.owner === goalie || goalie.cooldown > 0) return;
+  const dist = Math.hypot(puck.x - goalie.x, puck.y - goalie.y);
+  const gloveCatch = glove.open > 0 && dist <= catchReach();
+  const slow = !puck.owner && Math.hypot(puck.vx, puck.vy) < SLOW_PUCK;
+  const pickUp = slow && dist <= GOALIE_R + PUCK_R + 14;
+  if (!gloveCatch && !pickUp) return;
+  const wasShot = puck.shot && gloveCatch;
   if (puck.owner === skater) skater.cooldown = 0.8;
   puck.owner = goalie;
   puck.shot = false;
@@ -524,6 +609,7 @@ function skaterPickup() {
   if (puck.owner || skater.cooldown > 0 || !touchesPuck(skater)) return;
   puck.owner = skater;
   puck.shot = false;
+  skaterHeld = 0;
   Sound.tone(400, 0.05, 'triangle', 0, 0.12);
   pickShotSpot();
 }
@@ -537,10 +623,15 @@ function updatePuck(dt) {
   } else {
     puck.x += puck.vx * dt;
     puck.y += puck.vy * dt;
-    const friction = Math.pow(PUCK_FRICTION, dt);
+    const slow = Math.hypot(puck.vx, puck.vy) < SLOW_PUCK;
+    const friction = Math.pow(slow ? SLOW_FRICTION : PUCK_FRICTION, dt);
     puck.vx *= friction;
     puck.vy *= friction;
     const speed = Math.hypot(puck.vx, puck.vy);
+    if (speed < 15) {
+      puck.vx = 0;
+      puck.vy = 0;
+    }
     // Отскок зеркальный (угол падения = углу отражения), чтобы броски через борт были предсказуемыми.
     if (collideRink(puck, PUCK_R, 1, true)) {
       puck.vx *= BOARD_BOUNCE_KEEP;
@@ -837,6 +928,37 @@ function drawBadge(x, y, color, value) {
   ctx.fillText(String(value), x, y + 3);
 }
 
+// Кнопка действия для планшета: ловушка (поймать) или клюшка (бросить).
+function drawActionButton(time) {
+  if (!showActionButton() || state !== 'play') return;
+  const { x, y, r } = ACTION_BUTTON;
+  const holding = puck.owner === goalie;
+  const pressed = glove.open > 0;
+  const pulse = holding ? 1 + 0.05 * Math.sin(time * 8) : 1;
+  ctx.save();
+  ctx.globalAlpha = 0.85;
+  ctx.fillStyle = holding ? '#43a047' : pressed ? '#ffd600' : '#ffb300';
+  ctx.beginPath();
+  ctx.arc(x, y, r * pulse, 0, Math.PI * 2);
+  ctx.fill();
+  drawCircle(ctx, x, y, r * pulse, '#ffffff', 6);
+  ctx.globalAlpha = 1;
+  ctx.font = `${Math.round(r * 0.9)}px sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(holding ? '🏒' : '🧤', x, y + 4);
+  ctx.restore();
+}
+
+// Кружок под пальцем, который ведёт вратаря.
+function drawTouchMarker() {
+  if (mode !== 'pvc' || state !== 'play') return;
+  const touch = movingTouch();
+  if (!touch) return;
+  const p = toWorld(touch);
+  drawCircle(ctx, p.x, p.y, 40, 'rgba(255,255,255,0.6)', 5);
+}
+
 function drawScore() {
   ctx.font = 'bold 48px sans-serif';
   ctx.textAlign = 'center';
@@ -994,6 +1116,8 @@ function draw(time) {
   drawPuck();
   drawScore();
   drawMenuButton();
+  drawTouchMarker();
+  drawActionButton(time);
   drawSaveFlash();
   Effects.draw(ctx);
   if (state === 'goal' && goalInfo.mine) drawGoalText(time);

@@ -88,7 +88,7 @@ function bankTarget(x, y, goalX, ty, wall, r) {
   const t = (wallY - y) / (mirrorY - y);
   const bounceX = x + t * (goalX - x);
   if (bounceX < RINK.left + RINK.corner + 20 || bounceX > RINK.right - RINK.corner - 20) return null;
-  return { x: goalX, y: mirrorY };
+  return { x: goalX, y: mirrorY, bounce: { x: bounceX, y: wallY } };
 }
 
 function drawNet(ctx, x, dir) {
